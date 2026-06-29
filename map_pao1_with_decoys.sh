@@ -1,53 +1,98 @@
-#load modules
-module load anaconda3
-conda activate MappingTools
+#!/usr/bin/env bash
+set -euo pipefail
 
-#cutadapt (Add concatenate later)
-fastq_filenames=($(ls *.fastq))
+CONFIG_FILE="${1:-config.env}"
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "Config file not found: $CONFIG_FILE" >&2
+  echo "Usage: bash $0 [config.env]" >&2
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+: "${FASTQ_DIR:=.}"
+: "${FASTQ_GLOB:=*.fastq}"
+: "${OUTPUT_DIR:=.}"
+: "${DECOY_BOWTIE2_INDEX:?Set DECOY_BOWTIE2_INDEX in $CONFIG_FILE}"
+: "${PAO1_BOWTIE2_INDEX:?Set PAO1_BOWTIE2_INDEX in $CONFIG_FILE}"
+: "${PAO1_GFF3:?Set PAO1_GFF3 in $CONFIG_FILE}"
+: "${ADAPTER_SEQUENCE:=AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC}"
+: "${MIN_READ_LENGTH:=22}"
+: "${CUTADAPT_THREADS:=40}"
+: "${BOWTIE2_DECOY_THREADS:=24}"
+: "${BOWTIE2_PAO1_THREADS:=16}"
+: "${FEATURECOUNTS_THREADS:=24}"
+: "${SAMTOOLS_THREADS:=16}"
+: "${CSV_CONVERSION_SCRIPT:=pao1_with_decoys_csvConversion.py}"
+
+mkdir -p "$OUTPUT_DIR"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "$CSV_CONVERSION_SCRIPT" != /* ]]; then
+  CSV_CONVERSION_SCRIPT="$SCRIPT_DIR/$CSV_CONVERSION_SCRIPT"
+fi
+
+shopt -s nullglob
+fastq_filenames=("$FASTQ_DIR"/$FASTQ_GLOB)
+if (( ${#fastq_filenames[@]} == 0 )); then
+  echo "No FASTQ files found in $FASTQ_DIR matching $FASTQ_GLOB" >&2
+  exit 1
+fi
+
+# cutadapt
 for i in "${fastq_filenames[@]}"
 do
-  i_basename=$(basename $i .fastq)
+  i_basename=$(basename "$i" .fastq)
   echo "trimming adapters from $i_basename ..."
-  cutadapt -m 22 -j 40 -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC -o "$i_basename"_22bp.trim.fastq "$i_basename".fastq > "$i_basename"_22bp.cutadapt_log.txt
+  cutadapt -m "$MIN_READ_LENGTH" -j "$CUTADAPT_THREADS" -a "$ADAPTER_SEQUENCE" \
+    -o "$OUTPUT_DIR/${i_basename}_${MIN_READ_LENGTH}bp.trim.fastq" "$i" \
+    > "$OUTPUT_DIR/${i_basename}_${MIN_READ_LENGTH}bp.cutadapt_log.txt"
 done
 
-#mapping to PAO1 decoys
-trim_filenames=($(ls *.trim.fastq))
+# mapping to PAO1 decoys
+trim_filenames=("$OUTPUT_DIR"/*.trim.fastq)
 for i in "${trim_filenames[@]}"
 do
-  i_basename=$(basename $i .trim.fastq)
+  i_basename=$(basename "$i" .trim.fastq)
   echo "map to PA decoys $i_basename ..."
-  bowtie2 -p 24 -x ~/r-mwhiteley3-0/referencegenomes/Gina_Pangenome -U "$i_basename".trim.fastq -S "$i_basename".mapped_to_other_bugs.sam --un-gz "$i_basename"_unmapped_to_other_bugs.fastq > "$i_basename".mapped_to_other_bugs.bowtie2.txt
+  bowtie2 -p "$BOWTIE2_DECOY_THREADS" -x "$DECOY_BOWTIE2_INDEX" -U "$i" \
+    -S "$OUTPUT_DIR/${i_basename}.mapped_to_other_bugs.sam" \
+    --un-gz "$OUTPUT_DIR/${i_basename}_unmapped_to_other_bugs.fastq.gz" \
+    > "$OUTPUT_DIR/${i_basename}.mapped_to_other_bugs.bowtie2.txt"
 done
 
-#mapping with bowtie2 PAO1
-PA_trim_filenames=($(ls *unmapped_to_other_bugs.fastq))
+# mapping with bowtie2 PAO1
+PA_trim_filenames=("$OUTPUT_DIR"/*unmapped_to_other_bugs.fastq.gz)
 for i in "${PA_trim_filenames[@]}"
 do
-  i_basename=$(basename $i .fastq)
+  i_basename=$(basename "$i" .fastq.gz)
   echo "map to pseudomonas $i_basename ...."
-  bowtie2 --end-to-end -p 16 -x ~/r-mwhiteley3-0/referencegenomes/Pseudomonas_aeruginosa_PAO1_107 -q -U "$i_basename".fastq -S PAO1_"$i_basename".sam 2>> PAO1_"$i_basename".bowtie_output.txt
+  bowtie2 --end-to-end -p "$BOWTIE2_PAO1_THREADS" -x "$PAO1_BOWTIE2_INDEX" -q -U "$i" \
+    -S "$OUTPUT_DIR/PAO1_${i_basename}.sam" \
+    2>> "$OUTPUT_DIR/PAO1_${i_basename}.bowtie_output.txt"
 done
 
-PAO1_sam_filenames=($(ls PAO1*.sam))
+PAO1_sam_filenames=("$OUTPUT_DIR"/PAO1*.sam)
 
+# Create featureCounts summary file.
+# From Gina's paper: featureCounts v2.0.1 was used to assign mapped reads to PAO1 genes with the flags -s 1 (stranded) and -O (allowMultiOverlap) so that each read was assigned to a single locus or to neighboring genes.
+featureCounts -T "$FEATURECOUNTS_THREADS" -a "$PAO1_GFF3" -O -s 1 -g locus -t CDS \
+  -o "$OUTPUT_DIR/featurecounts_PAO1_summary.txt" "${PAO1_sam_filenames[@]}"
+sed 's/\t/,/g' "$OUTPUT_DIR/featurecounts_PAO1_summary.txt" > "$OUTPUT_DIR/featurecounts_PAO1_summary.csv"
 
-#Create featurecounts summary file
-#Frome Gina's paper: featureCounts v2.0.1 was used to assign mapped reads to PAO1 genes with the flags -s 1 (stranded) and -O (allowMultiOverlap) so that each read was assigned to a single locus or to neighboring genes
-featureCounts -T 24 -a ~/r-mwhiteley3-0/referencegenomes/Pseudomonas_aeruginosa_PAO1_107.gff3 -O -s 1 -g locus -t CDS -o featurecounts_PAO1_summary.txt PAO1*.sam
-sed 's/\t/,/g' featurecounts_PAO1_summary.txt > featurecounts_PAO1_summary.csv
-#mv featurecounts_PAO1_summary.txt.summary featurecounts_PAO1_summary_FILE_MAY_DIFFER_FROM_ACTUAL_COUNTS_SUM.summary
-
-### Calculate coverage with respect to PAO1 with samtools ###
+# Calculate coverage with respect to PAO1 with samtools.
 for i in "${PAO1_sam_filenames[@]}"
 do
-    i_basename=$(basename $i .sam)
+    i_basename=$(basename "$i" .sam)
     echo "analyzing $i_basename ..."
-    samtools view -@ 16 -bS "$i_basename".sam > "$i_basename".bam
-    samtools sort -@ 16 -o "$i_basename".sorted.bam "$i_basename".bam
-    samtools coverage -mA "$i_basename".sorted.bam
-    samtools coverage -m -o "$i_basename"_coverage.txt "$i_basename".sorted.bam
+    samtools view -@ "$SAMTOOLS_THREADS" -bS "$i" > "$OUTPUT_DIR/${i_basename}.bam"
+    samtools sort -@ "$SAMTOOLS_THREADS" -o "$OUTPUT_DIR/${i_basename}.sorted.bam" "$OUTPUT_DIR/${i_basename}.bam"
+    samtools coverage -mA "$OUTPUT_DIR/${i_basename}.sorted.bam"
+    samtools coverage -m -o "$OUTPUT_DIR/${i_basename}_coverage.txt" "$OUTPUT_DIR/${i_basename}.sorted.bam"
 done
 
-### Runs python script to convert results to csv file ###
-python3 ~/r-mwhiteley3-0/scripts/pao1_with_decoys_csvConversion.py
+# Run python script to convert results to csv file.
+(
+  cd "$OUTPUT_DIR"
+  python3 "$CSV_CONVERSION_SCRIPT"
+)
