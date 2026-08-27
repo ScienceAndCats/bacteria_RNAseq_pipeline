@@ -4,6 +4,8 @@ import fnmatch
 ### Import os module to use operating system dependent functionality ###
 import os
 
+BOWTIE_BACTERIA_DIR = os.path.join("bowtie_alignments", "bacteria")
+
 ### Creates a list of featureCounts files to count ###
 featureCountsFiles = []
 for file in os.listdir("."):
@@ -19,16 +21,16 @@ cutadaptFiles = sorted(cutadaptFiles, key=str.casefold)
 
 ### Creates list of bowtie files to count ###
 bowtieFiles = []
-for file in os.listdir("."):
+for file in os.listdir(BOWTIE_BACTERIA_DIR):
     if fnmatch.fnmatch(file, "BACTERIA*.bowtie_output.txt"):
-        bowtieFiles.append(file)
+        bowtieFiles.append(os.path.join(BOWTIE_BACTERIA_DIR, file))
 bowtieFiles= sorted(bowtieFiles, key=str.casefold)
 
 ### Creates list of coverage files to count ###
 coverageFilesList = []
-for file in os.listdir("."):
+for file in os.listdir(BOWTIE_BACTERIA_DIR):
     if fnmatch.fnmatch(file, "BACTERIA*_coverage.txt"):
-        coverageFilesList.append(file)
+        coverageFilesList.append(os.path.join(BOWTIE_BACTERIA_DIR, file))
 coverageFilesList= sorted(coverageFilesList, key=str.casefold)
 
 ### Creates a list of filenames ###

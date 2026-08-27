@@ -20,16 +20,26 @@ source "$CONFIG_FILE"
 : "${DECOY_BOWTIE2_INDEX:?Set DECOY_BOWTIE2_INDEX in $CONFIG_FILE}"
 : "${BACTERIA_BOWTIE2_INDEX:?Set BACTERIA_BOWTIE2_INDEX in $CONFIG_FILE}"
 : "${BACTERIA_GFF3:?Set BACTERIA_GFF3 in $CONFIG_FILE}"
+: "${HOST_FASTA:=}"
 : "${ADAPTER_SEQUENCE:=AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC}"
 : "${MIN_READ_LENGTH:=22}"
 : "${CUTADAPT_THREADS:=40}"
 : "${BOWTIE2_DECOY_THREADS:=24}"
 : "${BOWTIE2_BACTERIA_THREADS:=16}"
+: "${BOWTIE2_HOST_THREADS:=16}"
 : "${FEATURECOUNTS_THREADS:=24}"
 : "${SAMTOOLS_THREADS:=16}"
 : "${CSV_CONVERSION_SCRIPT:=bacteria_with_decoys_csvConversion.py}"
 
-mkdir -p "$OUTPUT_DIR"
+ALIGNMENT_DIR="$OUTPUT_DIR/bowtie_alignments"
+DECOY_ALIGNMENT_DIR="$ALIGNMENT_DIR/decoy"
+BACTERIA_ALIGNMENT_DIR="$ALIGNMENT_DIR/bacteria"
+HOST_ALIGNMENT_DIR="$ALIGNMENT_DIR/host"
+mkdir -p "$OUTPUT_DIR" "$DECOY_ALIGNMENT_DIR" "$BACTERIA_ALIGNMENT_DIR"
+if [[ -n "$HOST_FASTA" ]]; then
+  [[ -f "$HOST_FASTA" ]] || { echo "HOST_FASTA not found: $HOST_FASTA" >&2; exit 1; }
+  mkdir -p "$HOST_ALIGNMENT_DIR"
+fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "$CSV_CONVERSION_SCRIPT" != /* ]]; then
   CSV_CONVERSION_SCRIPT="$SCRIPT_DIR/$CSV_CONVERSION_SCRIPT"
@@ -117,23 +127,42 @@ do
   i_basename=$(basename "$i" .trim.fastq)
   echo "mapping to bacterial decoys: $i_basename ..."
   bowtie2 -p "$BOWTIE2_DECOY_THREADS" -x "$DECOY_BOWTIE2_INDEX" -U "$i" \
-    -S "$OUTPUT_DIR/${i_basename}.mapped_to_other_bugs.sam" \
-    --un-gz "$OUTPUT_DIR/${i_basename}_unmapped_to_other_bugs.fastq.gz" \
-    > "$OUTPUT_DIR/${i_basename}.mapped_to_other_bugs.bowtie2.txt"
+    -S "$DECOY_ALIGNMENT_DIR/${i_basename}.mapped_to_other_bugs.sam" \
+    --un-gz "$DECOY_ALIGNMENT_DIR/${i_basename}_unmapped_to_other_bugs.fastq.gz" \
+    2> "$DECOY_ALIGNMENT_DIR/${i_basename}.mapped_to_other_bugs.bowtie2.txt"
 done
 
 # Mapping to the target bacterial reference with Bowtie2.
-BACTERIA_trim_filenames=("$OUTPUT_DIR"/*unmapped_to_other_bugs.fastq.gz)
+BACTERIA_trim_filenames=("$DECOY_ALIGNMENT_DIR"/*unmapped_to_other_bugs.fastq.gz)
 for i in "${BACTERIA_trim_filenames[@]}"
 do
   i_basename=$(basename "$i" .fastq.gz)
   echo "mapping to the bacterial reference: $i_basename ..."
   bowtie2 --end-to-end -p "$BOWTIE2_BACTERIA_THREADS" -x "$BACTERIA_BOWTIE2_INDEX" -q -U "$i" \
-    -S "$OUTPUT_DIR/BACTERIA_${i_basename}.sam" \
-    2>> "$OUTPUT_DIR/BACTERIA_${i_basename}.bowtie_output.txt"
+    -S "$BACTERIA_ALIGNMENT_DIR/BACTERIA_${i_basename}.sam" \
+    2> "$BACTERIA_ALIGNMENT_DIR/BACTERIA_${i_basename}.bowtie_output.txt"
 done
 
-BACTERIA_sam_filenames=("$OUTPUT_DIR"/BACTERIA*.sam)
+BACTERIA_sam_filenames=("$BACTERIA_ALIGNMENT_DIR"/BACTERIA*.sam)
+
+# Optionally build an index from a user-provided host FASTA and align the same
+# decoy-unmapped reads used for bacterial mapping. An empty HOST_FASTA disables
+# this independent host alignment.
+if [[ -n "$HOST_FASTA" ]]; then
+  host_index="$HOST_ALIGNMENT_DIR/host_reference"
+  if [[ ! -f "${host_index}.1.bt2" && ! -f "${host_index}.1.bt2l" ]]; then
+    echo "building host Bowtie2 index ..."
+    bowtie2-build --threads "$BOWTIE2_HOST_THREADS" "$HOST_FASTA" "$host_index" \
+      > "$HOST_ALIGNMENT_DIR/host_reference.bowtie2-build.txt" 2>&1
+  fi
+  for i in "${BACTERIA_trim_filenames[@]}"; do
+    i_basename=$(basename "$i" .fastq.gz)
+    echo "mapping to the host reference: $i_basename ..."
+    bowtie2 --end-to-end -p "$BOWTIE2_HOST_THREADS" -x "$host_index" -q -U "$i" \
+      -S "$HOST_ALIGNMENT_DIR/HOST_${i_basename}.sam" \
+      2> "$HOST_ALIGNMENT_DIR/HOST_${i_basename}.bowtie_output.txt"
+  done
+fi
 
 # Create featureCounts summary file.
 # Assign mapped reads to bacterial genes, retaining the pipeline's stranded and
@@ -147,10 +176,10 @@ for i in "${BACTERIA_sam_filenames[@]}"
 do
     i_basename=$(basename "$i" .sam)
     echo "analyzing $i_basename ..."
-    samtools view -@ "$SAMTOOLS_THREADS" -bS "$i" > "$OUTPUT_DIR/${i_basename}.bam"
-    samtools sort -@ "$SAMTOOLS_THREADS" -o "$OUTPUT_DIR/${i_basename}.sorted.bam" "$OUTPUT_DIR/${i_basename}.bam"
-    samtools coverage -mA "$OUTPUT_DIR/${i_basename}.sorted.bam"
-    samtools coverage -m -o "$OUTPUT_DIR/${i_basename}_coverage.txt" "$OUTPUT_DIR/${i_basename}.sorted.bam"
+    samtools view -@ "$SAMTOOLS_THREADS" -bS "$i" > "$BACTERIA_ALIGNMENT_DIR/${i_basename}.bam"
+    samtools sort -@ "$SAMTOOLS_THREADS" -o "$BACTERIA_ALIGNMENT_DIR/${i_basename}.sorted.bam" "$BACTERIA_ALIGNMENT_DIR/${i_basename}.bam"
+    samtools coverage -mA "$BACTERIA_ALIGNMENT_DIR/${i_basename}.sorted.bam"
+    samtools coverage -m -o "$BACTERIA_ALIGNMENT_DIR/${i_basename}_coverage.txt" "$BACTERIA_ALIGNMENT_DIR/${i_basename}.sorted.bam"
 done
 
 # Run python script to convert results to csv file.
