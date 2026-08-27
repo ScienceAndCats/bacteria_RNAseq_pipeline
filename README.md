@@ -9,7 +9,7 @@ This repository contains a single-end FASTQ processing pipeline for bacterial se
 1. Finds input FASTQ files matching the configured glob and, when sampling is enabled, randomly selects up to the configured number of reads from each file.
 2. Uses `cutadapt` to remove Illumina adapter sequence and discard reads shorter than the configured minimum length.
 3. Uses `bowtie2` to map trimmed reads to a decoy/pangenome index and keeps reads that do **not** map to the decoys.
-4. Uses `bowtie2` again to map decoy-unmapped reads to the bacterial reference index and, when `HOST_FASTA` is set, independently maps those reads to a generated host index.
+4. Uses `bowtie2` again to map decoy-unmapped reads to the bacterial reference index, retaining the reads that also fail this second alignment. When `HOST_FASTA` is set, only those reads that mapped to neither the decoy nor the bacterium are mapped to a generated host index.
 5. Uses `featureCounts` from Subread to assign aligned reads to CDS features in the configured bacterial GFF3 annotation and, when `HOST_GFF3` is set, independently counts the host alignments against the host annotation.
 6. Uses `samtools` to create, sort, and calculate coverage from BAM files.
 7. Runs `bacteria_with_decoys_csvConversion.py` to combine cutadapt, bowtie2, coverage, and featureCounts outputs into `BACTERIA_<project-directory>.csv`.
@@ -65,7 +65,7 @@ Set `SAMPLE_READS="true"` in `config.env` for a quick exploratory run. Before tr
 
 The Bowtie2 index settings should be the index basename, not an individual `.bt2` file. For example, use `/refs/bacteria_reference` if the files are named `/refs/bacteria_reference.1.bt2`, `/refs/bacteria_reference.2.bt2`, and so on.
 
-To enable host mapping, set `HOST_FASTA` to a readable FASTA file. The pipeline builds and reuses a host index under `bowtie_alignments/host`; setting `HOST_FASTA=""` skips both index building and host alignment. To also count reads assigned to host CDS features, set `HOST_GFF3` to a readable annotation file. Host feature counting runs only when `HOST_GFF3` is set, and its outputs remain separate from the bacterial counts under `bowtie_alignments/host`.
+To enable host mapping, set `HOST_FASTA` to a readable FASTA file. The pipeline builds and reuses a host index under `bowtie_alignments/host`; setting `HOST_FASTA=""` skips both index building and host alignment. Host Bowtie2 input consists exclusively of reads that did not align to either the decoy or bacterial reference. To also count reads assigned to host CDS features, set `HOST_GFF3` to a readable annotation file. Host feature counting runs only when `HOST_GFF3` is set, and its outputs remain separate from the bacterial counts under `bowtie_alignments/host`.
 
 ## Run the pipeline
 
@@ -86,7 +86,8 @@ bash map_bacteria_with_decoys.sh configs/project_a.env
 - `*_22bp.trim.fastq` — adapter-trimmed FASTQ files.
 - `bowtie_alignments/decoy/` — decoy SAM files, Bowtie2 logs, and decoy-unmapped reads.
 - `bowtie_alignments/bacteria/` — bacterial SAM/BAM files, Bowtie2 logs, and coverage reports.
-- `bowtie_alignments/host/` — optional host index, SAM files, and Bowtie2 logs.
+- `bowtie_alignments/bacteria/*_unmapped_to_bacteria.fastq.gz` — reads that mapped to neither the decoy nor bacterial reference and are used as the optional host-alignment input.
+- `bowtie_alignments/host/` — optional host index, SAM files, Bowtie2 logs, and host featureCounts results.
 - `featurecounts_BACTERIA_summary.txt` and `featurecounts_BACTERIA_summary.csv` — featureCounts results.
 - `bowtie_alignments/host/featurecounts_HOST_summary.txt` and `.csv` — optional, separate host featureCounts results.
 - `bowtie_alignments/bacteria/BACTERIA_*_coverage.txt` — samtools coverage reports.

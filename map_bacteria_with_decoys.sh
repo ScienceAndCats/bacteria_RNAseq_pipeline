@@ -139,20 +139,24 @@ done
 
 # Mapping to the target bacterial reference with Bowtie2.
 BACTERIA_trim_filenames=("$DECOY_ALIGNMENT_DIR"/*unmapped_to_other_bugs.fastq.gz)
+HOST_trim_filenames=()
 for i in "${BACTERIA_trim_filenames[@]}"
 do
   i_basename=$(basename "$i" .fastq.gz)
+  host_input="$BACTERIA_ALIGNMENT_DIR/${i_basename}_unmapped_to_bacteria.fastq.gz"
   echo "mapping to the bacterial reference: $i_basename ..."
   bowtie2 --end-to-end -p "$BOWTIE2_BACTERIA_THREADS" -x "$BACTERIA_BOWTIE2_INDEX" -q -U "$i" \
     -S "$BACTERIA_ALIGNMENT_DIR/BACTERIA_${i_basename}.sam" \
+    --un-gz "$host_input" \
     2> "$BACTERIA_ALIGNMENT_DIR/BACTERIA_${i_basename}.bowtie_output.txt"
+  HOST_trim_filenames+=("$host_input")
 done
 
 BACTERIA_sam_filenames=("$BACTERIA_ALIGNMENT_DIR"/BACTERIA*.sam)
 
-# Optionally build an index from a user-provided host FASTA and align the same
-# decoy-unmapped reads used for bacterial mapping. An empty HOST_FASTA disables
-# this independent host alignment.
+# Optionally build an index from a user-provided host FASTA and align only reads
+# that mapped to neither the decoy nor the bacterial reference. An empty
+# HOST_FASTA disables host alignment.
 if [[ -n "$HOST_FASTA" ]]; then
   host_index="$HOST_ALIGNMENT_DIR/host_reference"
   if [[ ! -f "${host_index}.1.bt2" && ! -f "${host_index}.1.bt2l" ]]; then
@@ -160,7 +164,7 @@ if [[ -n "$HOST_FASTA" ]]; then
     bowtie2-build --threads "$BOWTIE2_HOST_THREADS" "$HOST_FASTA" "$host_index" \
       > "$HOST_ALIGNMENT_DIR/host_reference.bowtie2-build.txt" 2>&1
   fi
-  for i in "${BACTERIA_trim_filenames[@]}"; do
+  for i in "${HOST_trim_filenames[@]}"; do
     i_basename=$(basename "$i" .fastq.gz)
     echo "mapping to the host reference: $i_basename ..."
     bowtie2 --end-to-end -p "$BOWTIE2_HOST_THREADS" -x "$host_index" -q -U "$i" \
