@@ -1,4 +1,4 @@
-name: whiteley-pa-pipeline
+name: whiteley-bacteria-pipeline
 channels:
   - conda-forge
   - bioconda

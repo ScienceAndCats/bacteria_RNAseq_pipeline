@@ -7,7 +7,7 @@ import os
 ### Creates a list of featureCounts files to count ###
 featureCountsFiles = []
 for file in os.listdir("."):
-    if fnmatch.fnmatch(file, "featurecounts_PAO1_summary.txt"):
+    if fnmatch.fnmatch(file, "featurecounts_BACTERIA_summary.txt"):
         featureCountsFiles.append(file)
 
 ### Creates list of cutadapt files to count ##
@@ -20,14 +20,14 @@ cutadaptFiles = sorted(cutadaptFiles, key=str.casefold)
 ### Creates list of bowtie files to count ###
 bowtieFiles = []
 for file in os.listdir("."):
-    if fnmatch.fnmatch(file, "PAO1*.bowtie_output.txt"):
+    if fnmatch.fnmatch(file, "BACTERIA*.bowtie_output.txt"):
         bowtieFiles.append(file)
 bowtieFiles= sorted(bowtieFiles, key=str.casefold)
 
 ### Creates list of coverage files to count ###
 coverageFilesList = []
 for file in os.listdir("."):
-    if fnmatch.fnmatch(file, "PAO1*_coverage.txt"):
+    if fnmatch.fnmatch(file, "BACTERIA*_coverage.txt"):
         coverageFilesList.append(file)
 coverageFilesList= sorted(coverageFilesList, key=str.casefold)
 
@@ -42,7 +42,7 @@ filenames = sorted(filenames, key=str.casefold)
 import csv
 full_path = os.getcwd().split("/")
 projectName = full_path[len(full_path)-1]
-summary_basename = "PAO1_" + projectName + ".csv"
+summary_basename = "BACTERIA_" + projectName + ".csv"
 csvfile=open( summary_basename, 'w')
 csvfile.write("Sample, Raw Reads, Reads Written, Overall Allignment, Percent Covered, Mean Coverage, Reads Assigned to features, Features with non-zero reads\n")
 
@@ -174,13 +174,13 @@ for file in coverageFilesList:
     meanCoverageList.append(meanCoverage)
 
 ### Coverage info is put into txt files ###
-percent= open("PAO1_percentCoverage.txt","w+")
+percent= open("BACTERIA_percentCoverage.txt","w+")
 for i in percentCoverageList:
     percent.write(i)
     percent.write('\n')
 percent.close()
 
-mean= open("PAO1_meanCoverage.txt","w+")
+mean= open("BACTERIA_meanCoverage.txt","w+")
 for i in meanCoverageList:
     mean.write(i)
     mean.write('\n')
@@ -188,14 +188,14 @@ mean.close()
 
 ### Puts data for mean coverage into a list ###
 meanCoverageList = []
-with open("PAO1_meanCoverage.txt", "r") as a_file:
+with open("BACTERIA_meanCoverage.txt", "r") as a_file:
     for line in a_file:
         meanCoverage = line.replace('\n', '')
         meanCoverageList.append(meanCoverage)
 
 ### Puts data for percent coverage into a list ###
 percentCoverageList = []
-with open("PAO1_percentCoverage.txt", "r") as a_file:
+with open("BACTERIA_percentCoverage.txt", "r") as a_file:
     for line in a_file:
         percentCoverage = line.replace('\n', '')
         percentCoverageList.append(percentCoverage)
