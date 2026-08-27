@@ -21,6 +21,7 @@ source "$CONFIG_FILE"
 : "${BACTERIA_BOWTIE2_INDEX:?Set BACTERIA_BOWTIE2_INDEX in $CONFIG_FILE}"
 : "${BACTERIA_GFF3:?Set BACTERIA_GFF3 in $CONFIG_FILE}"
 : "${HOST_FASTA:=}"
+: "${HOST_GFF3:=}"
 : "${ADAPTER_SEQUENCE:=AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC}"
 : "${MIN_READ_LENGTH:=22}"
 : "${CUTADAPT_THREADS:=40}"
@@ -39,6 +40,10 @@ mkdir -p "$OUTPUT_DIR" "$DECOY_ALIGNMENT_DIR" "$BACTERIA_ALIGNMENT_DIR"
 if [[ -n "$HOST_FASTA" ]]; then
   [[ -f "$HOST_FASTA" ]] || { echo "HOST_FASTA not found: $HOST_FASTA" >&2; exit 1; }
   mkdir -p "$HOST_ALIGNMENT_DIR"
+fi
+if [[ -n "$HOST_GFF3" ]]; then
+  [[ -n "$HOST_FASTA" ]] || { echo "HOST_GFF3 requires HOST_FASTA to enable host alignment" >&2; exit 1; }
+  [[ -f "$HOST_GFF3" ]] || { echo "HOST_GFF3 not found: $HOST_GFF3" >&2; exit 1; }
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "$CSV_CONVERSION_SCRIPT" != /* ]]; then
@@ -170,6 +175,16 @@ fi
 featureCounts -T "$FEATURECOUNTS_THREADS" -a "$BACTERIA_GFF3" -O -s 1 -g locus -t CDS \
   -o "$OUTPUT_DIR/featurecounts_BACTERIA_summary.txt" "${BACTERIA_sam_filenames[@]}"
 sed 's/\t/,/g' "$OUTPUT_DIR/featurecounts_BACTERIA_summary.txt" > "$OUTPUT_DIR/featurecounts_BACTERIA_summary.csv"
+
+# When a host annotation is configured, independently assign host alignments to
+# its CDS features and keep the results alongside the host Bowtie2 outputs.
+if [[ -n "$HOST_GFF3" ]]; then
+  HOST_sam_filenames=("$HOST_ALIGNMENT_DIR"/HOST_*.sam)
+  featureCounts -T "$FEATURECOUNTS_THREADS" -a "$HOST_GFF3" -O -s 1 -g locus -t CDS \
+    -o "$HOST_ALIGNMENT_DIR/featurecounts_HOST_summary.txt" "${HOST_sam_filenames[@]}"
+  sed 's/\t/,/g' "$HOST_ALIGNMENT_DIR/featurecounts_HOST_summary.txt" \
+    > "$HOST_ALIGNMENT_DIR/featurecounts_HOST_summary.csv"
+fi
 
 # Calculate coverage with respect to the bacterial reference with samtools.
 for i in "${BACTERIA_sam_filenames[@]}"
