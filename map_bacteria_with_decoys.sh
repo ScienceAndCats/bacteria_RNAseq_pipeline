@@ -20,7 +20,7 @@ source "$CONFIG_FILE"
 : "${DECOY_BOWTIE2_INDEX:?Set DECOY_BOWTIE2_INDEX in $CONFIG_FILE}"
 : "${BACTERIA_BOWTIE2_INDEX:?Set BACTERIA_BOWTIE2_INDEX in $CONFIG_FILE}"
 : "${BACTERIA_GFF3:?Set BACTERIA_GFF3 in $CONFIG_FILE}"
-: "${HOST_FASTA:=}"
+: "${HOST_BOWTIE2_INDEX:=}"
 : "${HOST_GFF3:=}"
 : "${ADAPTER_SEQUENCE:=AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC}"
 : "${MIN_READ_LENGTH:=22}"
@@ -37,17 +37,60 @@ DECOY_ALIGNMENT_DIR="$ALIGNMENT_DIR/decoy"
 BACTERIA_ALIGNMENT_DIR="$ALIGNMENT_DIR/bacteria"
 HOST_ALIGNMENT_DIR="$ALIGNMENT_DIR/host"
 mkdir -p "$OUTPUT_DIR" "$DECOY_ALIGNMENT_DIR" "$BACTERIA_ALIGNMENT_DIR"
-if [[ -n "$HOST_FASTA" ]]; then
-  [[ -f "$HOST_FASTA" ]] || { echo "HOST_FASTA not found: $HOST_FASTA" >&2; exit 1; }
+if [[ -n "$HOST_BOWTIE2_INDEX" ]]; then
   mkdir -p "$HOST_ALIGNMENT_DIR"
 fi
 if [[ -n "$HOST_GFF3" ]]; then
-  [[ -n "$HOST_FASTA" ]] || { echo "HOST_GFF3 requires HOST_FASTA to enable host alignment" >&2; exit 1; }
+  [[ -n "$HOST_BOWTIE2_INDEX" ]] || { echo "HOST_GFF3 requires HOST_BOWTIE2_INDEX to enable host alignment" >&2; exit 1; }
   [[ -f "$HOST_GFF3" ]] || { echo "HOST_GFF3 not found: $HOST_GFF3" >&2; exit 1; }
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "$CSV_CONVERSION_SCRIPT" != /* ]]; then
   CSV_CONVERSION_SCRIPT="$SCRIPT_DIR/$CSV_CONVERSION_SCRIPT"
+fi
+
+# Reuse a complete Bowtie2 index when one is present. Otherwise, build it from
+# a FASTA beside the configured basename (for example, reference.fa for the
+# basename reference). Fail before processing reads if neither input exists.
+prepare_bowtie2_index() {
+  local index_basename="$1"
+  local reference_label="$2"
+  local threads="$3"
+  local index_extension index_part fasta_extension fasta_file
+
+  for index_extension in bt2 bt2l; do
+    for index_part in 1 2 3 4 rev.1 rev.2; do
+      [[ -f "${index_basename}.${index_part}.${index_extension}" ]] || break
+    done
+    if [[ "$index_part" == "rev.2" && -f "${index_basename}.rev.2.${index_extension}" ]]; then
+      echo "using existing $reference_label Bowtie2 index: $index_basename"
+      return 0
+    fi
+  done
+
+  fasta_file=""
+  for fasta_extension in fa fasta fna fa.gz fasta.gz fna.gz; do
+    if [[ -f "${index_basename}.${fasta_extension}" ]]; then
+      fasta_file="${index_basename}.${fasta_extension}"
+      break
+    fi
+  done
+
+  if [[ -z "$fasta_file" ]]; then
+    echo "ERROR: $reference_label Bowtie2 index not found for basename: $index_basename" >&2
+    echo "ERROR: No reference FASTA found; expected ${index_basename}.{fa,fasta,fna}[.gz]." >&2
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$index_basename")"
+  echo "building $reference_label Bowtie2 index from $fasta_file ..."
+  bowtie2-build --threads "$threads" "$fasta_file" "$index_basename"
+}
+
+prepare_bowtie2_index "$DECOY_BOWTIE2_INDEX" "decoy" "$BOWTIE2_DECOY_THREADS"
+prepare_bowtie2_index "$BACTERIA_BOWTIE2_INDEX" "bacterial" "$BOWTIE2_BACTERIA_THREADS"
+if [[ -n "$HOST_BOWTIE2_INDEX" ]]; then
+  prepare_bowtie2_index "$HOST_BOWTIE2_INDEX" "host" "$BOWTIE2_HOST_THREADS"
 fi
 
 shopt -s nullglob
@@ -154,20 +197,13 @@ done
 
 BACTERIA_sam_filenames=("$BACTERIA_ALIGNMENT_DIR"/BACTERIA*.sam)
 
-# Optionally build an index from a user-provided host FASTA and align only reads
-# that mapped to neither the decoy nor the bacterial reference. An empty
-# HOST_FASTA disables host alignment.
-if [[ -n "$HOST_FASTA" ]]; then
-  host_index="$HOST_ALIGNMENT_DIR/host_reference"
-  if [[ ! -f "${host_index}.1.bt2" && ! -f "${host_index}.1.bt2l" ]]; then
-    echo "building host Bowtie2 index ..."
-    bowtie2-build --threads "$BOWTIE2_HOST_THREADS" "$HOST_FASTA" "$host_index" \
-      > "$HOST_ALIGNMENT_DIR/host_reference.bowtie2-build.txt" 2>&1
-  fi
+# Optionally align reads that mapped to neither the decoy nor the bacterial
+# reference. An empty host index basename disables host alignment.
+if [[ -n "$HOST_BOWTIE2_INDEX" ]]; then
   for i in "${HOST_trim_filenames[@]}"; do
     i_basename=$(basename "$i" .fastq.gz)
     echo "mapping to the host reference: $i_basename ..."
-    bowtie2 --end-to-end -p "$BOWTIE2_HOST_THREADS" -x "$host_index" -q -U "$i" \
+    bowtie2 --end-to-end -p "$BOWTIE2_HOST_THREADS" -x "$HOST_BOWTIE2_INDEX" -q -U "$i" \
       -S "$HOST_ALIGNMENT_DIR/HOST_${i_basename}.sam" \
       2> "$HOST_ALIGNMENT_DIR/HOST_${i_basename}.bowtie_output.txt"
   done
