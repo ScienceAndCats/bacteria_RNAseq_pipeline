@@ -11,11 +11,12 @@ This repository contains a single- and paired-end FASTQ processing pipeline for 
 3. Uses `bowtie2` to map trimmed reads to a decoy/pangenome index and keeps reads that do **not** map to the decoys.
 4. Uses `bowtie2` again to map decoy-unmapped reads to the bacterial reference index, retaining the reads that also fail this second alignment. When `HOST_BOWTIE2_INDEX` is set, only those reads that mapped to neither the decoy nor the bacterium are mapped to the host index.
 5. Uses `featureCounts` from Subread to assign aligned reads to CDS features in the bacterial GFF annotation sharing the reference basename and, when host mapping is enabled, independently counts host alignments against the matching host annotation.
-6. Uses `samtools` to create, sort, and calculate coverage from BAM files.
-7. Runs `bacteria_with_decoys_csvConversion.py` to combine cutadapt, bowtie2, coverage, and featureCounts outputs into `BACTERIA_<project-directory>.csv`.
-8. Writes `BACTERIA_<project-directory>_read_breakdown.csv`, with one sample per row and read counts, percentages of total reads, and the source of every value.
+6. Uses `samtools` to create, sort, index, and calculate coverage from BAM files.
+7. Uses `gene_position_profile.py` on each sorted bacterial BAM to calculate strand-aware, normalized feature-position and aggregate metagene profiles.
+8. Runs `bacteria_with_decoys_csvConversion.py` to combine cutadapt, bowtie2, coverage, and featureCounts outputs into `BACTERIA_<project-directory>.csv`.
+9. Writes `BACTERIA_<project-directory>_read_breakdown.csv`, with one sample per row and read counts, percentages of total reads, and the source of every value.
 
-The Python conversion script uses only the Python standard library.
+The summary conversion scripts use only the Python standard library. Positional profiling uses pysam and matplotlib.
 
 ## Dependencies
 
@@ -26,6 +27,8 @@ The pipeline environment pins these command-line tools:
 - bowtie2 2.5.4
 - samtools 1.22.1
 - Subread / featureCounts 2.1.1
+- pysam
+- matplotlib
 
 A conda environment file is provided in `environment.yml`.
 
@@ -58,6 +61,8 @@ Edit `config.env` before running the pipeline. The key settings are:
 | `ADAPTER_R1`, `ADAPTER_R2` | Mate-specific paired-end adapters (both default to `CTGTCTCTTATACACATCT`). |
 | `MIN_READ_LENGTH` | Minimum read length retained by cutadapt. |
 | `THREADS` | Number of threads used by every multithreaded step (default: `16`). |
+| `GENE_POSITION_BINS` | Number of equal normalized 5'-to-3' bins (default: `100`). |
+| `METAGENE_MIN_FEATURE_READS` | Assigned reads/fragments required for a feature to contribute to aggregate profiles (default: `10`). |
 | `CSV_CONVERSION_SCRIPT` | Path to `bacteria_with_decoys_csvConversion.py`. |
 
 ### Quick sampling mode
@@ -96,6 +101,12 @@ bash map_bacteria_with_decoys.sh configs/project_a.env
 - `featurecounts_BACTERIA_summary.txt` and `featurecounts_BACTERIA_summary.csv` — featureCounts results.
 - `bowtie_alignments/host/featurecounts_HOST_summary.txt` and `.csv` — optional, separate host featureCounts results.
 - `bowtie_alignments/bacteria/BACTERIA_*_coverage.txt` — samtools coverage reports.
+- `bowtie_alignments/bacteria/BACTERIA_*.feature_read_positions.csv` — unique per-read/per-fragment positions and explicitly flagged ambiguous overlaps.
+- `bowtie_alignments/bacteria/BACTERIA_*.feature_position_bins.csv` — read counts and within-feature fractions for every feature and normalized bin.
+- `bowtie_alignments/bacteria/BACTERIA_*.metagene_{CDS,non_CDS}_profile.csv` and `.png` — separate protein-coding and noncoding aggregate profiles.
+- `bowtie_alignments/bacteria/BACTERIA_*.metagene_non_CDS_by_type.csv` and `.png` — subtype profiles (for example rRNA, tRNA, ncRNA, tmRNA, and other).
+- `bowtie_alignments/bacteria/BACTERIA_*.metagene_CDS_vs_non_CDS.png` — comparison of mean normalized profiles.
+- `bowtie_alignments/bacteria/BACTERIA_*.feature_position_summary.csv` — examined, unique, ambiguous, outside-feature, contributing-feature, and non-CDS subtype counts.
 - `BACTERIA_<project-directory>.csv` — combined summary table.
 - `BACTERIA_<project-directory>_read_breakdown.csv` — per-sample read disposition. Each attribute has a raw count, a percentage of total input reads, and a source column. Bacterial and host non-rRNA values are the corresponding aligned counts minus reads assigned to an `rRNA` feature. Leftover reads passed cutadapt but aligned to none of the decoy, bacterial, or host references.
 
@@ -103,3 +114,11 @@ bash map_bacteria_with_decoys.sh configs/project_a.env
 
 - Input files must end in `.fastq` or `.fastq.gz`; use `FASTQ_GLOB` to narrow which files are selected.
 - Ensure the configured bacterial reference and annotation use compatible genome versions.
+
+## Normalized feature-position analysis
+
+The post-alignment analysis collapses differently sized annotated features onto a common biological coordinate: **0% is the 5' end and 100% is the 3' end**. It follows genomic start-to-end on `+` features and reverses genomic coordinates on `-` features. Single-end observations use the midpoint of the aligned portion. In paired mode, the complete aligned fragment midpoint is used and the pair is counted once. Unmapped, secondary, and supplementary alignments are ignored; duplicates are not filtered.
+
+Protein-coding loci (`CDS`) use the complete parent gene interval when the annotation hierarchy provides it (falling back to the combined CDS extent). Ordinary `gene` records are never treated as noncoding merely because they lack a CDS type. Non-CDS loci come from biologically informative RNA annotations such as rRNA, tRNA, tmRNA, ncRNA, sRNA, misc_RNA, and snRNA, with RNA children preferred over their generic gene parents. Subtype aggregates prevent abundant rRNA from silently dominating every noncoding comparison.
+
+Each feature is normalized independently: its bin fraction is `reads in bin / reads assigned to that feature`. Aggregate CSVs and plots report the mean and median of those per-feature fractions, rather than pooling raw reads. Features below `METAGENE_MIN_FEATURE_READS` remain visible in detailed and binned files but are excluded from aggregates. A midpoint overlapping multiple features in the same class is flagged in the detailed CSV, counted as ambiguous in the summary, and excluded from positional profiles rather than assigned arbitrarily. CDS and non-CDS assignment are evaluated separately, so biologically overlapping classes remain independently measurable.

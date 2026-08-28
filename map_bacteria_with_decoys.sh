@@ -26,9 +26,13 @@ source "$CONFIG_FILE"
 : "${ADAPTER_R2:=CTGTCTCTTATACACATCT}"
 : "${MIN_READ_LENGTH:=22}"
 : "${THREADS:=16}"
+: "${GENE_POSITION_BINS:=100}"
+: "${METAGENE_MIN_FEATURE_READS:=10}"
 : "${CSV_CONVERSION_SCRIPT:=bacteria_with_decoys_csvConversion.py}"
 
 [[ "$THREADS" =~ ^[1-9][0-9]*$ ]] || { echo "THREADS must be a positive integer" >&2; exit 1; }
+[[ "$GENE_POSITION_BINS" =~ ^[1-9][0-9]*$ ]] || { echo "GENE_POSITION_BINS must be a positive integer" >&2; exit 1; }
+[[ "$METAGENE_MIN_FEATURE_READS" =~ ^[1-9][0-9]*$ ]] || { echo "METAGENE_MIN_FEATURE_READS must be a positive integer" >&2; exit 1; }
 [[ "$READ_LAYOUT" == "single" || "$READ_LAYOUT" == "paired" ]] || { echo "READ_LAYOUT must be single or paired" >&2; exit 1; }
 
 shopt -s nullglob
@@ -378,8 +382,19 @@ do
     echo "analyzing $i_basename ..."
     samtools view -@ "$THREADS" -bS "$i" > "$BACTERIA_ALIGNMENT_DIR/${i_basename}.bam"
     samtools sort -@ "$THREADS" -o "$BACTERIA_ALIGNMENT_DIR/${i_basename}.sorted.bam" "$BACTERIA_ALIGNMENT_DIR/${i_basename}.bam"
+    samtools index -@ "$THREADS" "$BACTERIA_ALIGNMENT_DIR/${i_basename}.sorted.bam"
     samtools coverage -mA "$BACTERIA_ALIGNMENT_DIR/${i_basename}.sorted.bam"
     samtools coverage -m -o "$BACTERIA_ALIGNMENT_DIR/${i_basename}_coverage.txt" "$BACTERIA_ALIGNMENT_DIR/${i_basename}.sorted.bam"
+    profile_args=(
+      --bam "$BACTERIA_ALIGNMENT_DIR/${i_basename}.sorted.bam"
+      --gff "$BACTERIA_GFF"
+      --gene-id "$BACTERIA_GENE_ATTRIBUTE"
+      --bins "$GENE_POSITION_BINS"
+      --min-feature-reads "$METAGENE_MIN_FEATURE_READS"
+      --output-prefix "$BACTERIA_ALIGNMENT_DIR/${i_basename}"
+    )
+    [[ "$READ_LAYOUT" == "paired" ]] && profile_args+=(--paired)
+    python3 "$SCRIPT_DIR/gene_position_profile.py" "${profile_args[@]}"
 done
 
 # Run python script to convert results to csv file.
