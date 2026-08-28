@@ -46,7 +46,7 @@ Edit `config.env` before running the pipeline. The key settings are:
 | --- | --- |
 | `FASTQ_DIR` | Directory containing input FASTQ files. |
 | `FASTQ_GLOB` | Shell glob for FASTQ inputs, such as `*.fastq`. |
-| `READ_LAYOUT` | `single` (default) or `paired`; paired files must be named `<sample>_R1.fastq[.gz]` and `<sample>_R2.fastq[.gz]`. |
+| `READ_LAYOUT` | `single` (default) or `paired`; paired files may be named `<sample>_R1.fastq[.gz]` and `<sample>_R2.fastq[.gz]`, or include the same suffix after the read marker (for example, `_R1_001` and `_R2_001`). |
 | `OUTPUT_DIR` | Directory where output files should be written. |
 | `SAMPLE_READS` | Set to `true` to analyze a random subset of each input, or `false` to analyze every read. |
 | `SAMPLE_SIZE` | Maximum reads sampled from each FASTQ (default: `5000`). |
@@ -66,7 +66,7 @@ Set `SAMPLE_READS="true"` in `config.env` for a quick exploratory run. Before tr
 
 ### Paired-end input
 
-Set `READ_LAYOUT="paired"` and place matching mates in `FASTQ_DIR`, for example `sample_R1.fastq.gz` and `sample_R2.fastq.gz`. The pipeline fails early when either mate is missing. Cutadapt receives both inputs with `-a`/`-A` and `-o`/`-p`; each Bowtie2 stage receives the pair with `-1`/`-2` and preserves concordant unmapped pairs for the next stage. FeatureCounts counts fragments rather than individual mates in paired mode.
+Set `READ_LAYOUT="paired"` and place matching mates in `FASTQ_DIR`, for example `sample_R1.fastq.gz` and `sample_R2.fastq.gz`, or `sample_R1_001.fastq.gz` and `sample_R2_001.fastq.gz`. Any suffix after `_R1` must be identical to the suffix after `_R2`. The pipeline fails early when either mate is missing. Cutadapt receives both inputs with `-a`/`-A` and `-o`/`-p`; each Bowtie2 stage receives the pair with `-1`/`-2` and preserves concordant unmapped pairs for the next stage. FeatureCounts counts fragments rather than individual mates in paired mode.
 
 The Bowtie2 index settings should be the index basename, not an individual `.bt2` file. For example, use `/refs/bacteria_reference` if the files are named `/refs/bacteria_reference.1.bt2`, `/refs/bacteria_reference.2.bt2`, and so on. For every configured decoy, bacterial, or host basename, the pipeline first reuses a complete `.bt2` or `.bt2l` index. If no complete index exists, it looks beside that basename for `.fa`, `.fasta`, or `.fna` (optionally gzip-compressed) and builds the index at the configured basename. The bacterial and host annotations are discovered from the same basename using `.gff*`, which supports names such as `bacteria_reference.gff` and `bacteria_reference.gff3`. Exactly one matching annotation must exist. For feature counting, the pipeline uses the annotation's `locus` attribute as the gene identifier, automatically falling back to `locus_tag` and then `gene` when the preferred attributes are unavailable. It exits with a clear error before trimming reads when required reference inputs or identifier attributes are missing or ambiguous.
 
