@@ -9,3 +9,5 @@ dependencies:
   - bowtie2=2.5.5
   - samtools=1.24
   - subread=2.1.1 # provides featureCounts
+  - pysam
+  - matplotlib
