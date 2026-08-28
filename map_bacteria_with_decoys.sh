@@ -162,17 +162,17 @@ read1_filenames=()
 read2_filenames=()
 if [[ "$READ_LAYOUT" == "paired" ]]; then
   for i in "${matched_fastqs[@]}"; do
-    if [[ "$i" =~ _R1\.fastq(\.gz)?$ ]]; then
-      mate="${i/_R1.fastq/_R2.fastq}"
+    if [[ "$i" =~ _R1(_[^/]*)?\.fastq(\.gz)?$ ]]; then
+      mate="${i%_R1*}_R2${i##*_R1}"
       [[ -f "$mate" ]] || { echo "ERROR: Missing R2 mate for $i (expected $mate)" >&2; exit 1; }
       read1_filenames+=("$i")
       read2_filenames+=("$mate")
-    elif [[ "$i" =~ _R2\.fastq(\.gz)?$ ]]; then
-      mate="${i/_R2.fastq/_R1.fastq}"
+    elif [[ "$i" =~ _R2(_[^/]*)?\.fastq(\.gz)?$ ]]; then
+      mate="${i%_R2*}_R1${i##*_R2}"
       [[ -f "$mate" ]] || { echo "ERROR: Missing R1 mate for $i (expected $mate)" >&2; exit 1; }
     fi
   done
-  (( ${#read1_filenames[@]} > 0 )) || { echo "No paired FASTQs named *_R1.fastq[.gz] and *_R2.fastq[.gz] found" >&2; exit 1; }
+  (( ${#read1_filenames[@]} > 0 )) || { echo "No paired FASTQs named *_R1[_suffix].fastq[.gz] and *_R2[_suffix].fastq[.gz] found" >&2; exit 1; }
 else
   read1_filenames=("${matched_fastqs[@]}")
 fi
@@ -272,7 +272,7 @@ esac
 trim_r1=(); trim_r2=(); sample_names=()
 for idx in "${!read1_filenames[@]}"; do
   filename=$(basename "${read1_filenames[$idx]}"); filename=${filename%.gz}; filename=${filename%.fastq}
-  sample=${filename%_R1}
+  sample="${filename%_R1*}${filename##*_R1}"
   out1="$OUTPUT_DIR/${sample}_${MIN_READ_LENGTH}bp.trim.fastq"
   if [[ "$READ_LAYOUT" == "paired" ]]; then
     out1="$OUTPUT_DIR/${sample}_R1_${MIN_READ_LENGTH}bp.trim.fastq"
