@@ -4,8 +4,8 @@ channels:
   - bioconda
   - defaults
 dependencies:
-  - python=3.13.5
-  - cutadapt=5.1
-  - bowtie2=2.5.4
-  - samtools=1.22.1
-  - subread=2.1.1
+  - python=3.13.15
+  - cutadapt=5.2
+  - bowtie2=2.5.5
+  - samtools=1.24
+  - subread=2.1.1 # provides featureCounts
