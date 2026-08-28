@@ -10,7 +10,7 @@ This repository contains a single-end FASTQ processing pipeline for bacterial se
 2. Uses `cutadapt` to remove Illumina adapter sequence and discard reads shorter than the configured minimum length.
 3. Uses `bowtie2` to map trimmed reads to a decoy/pangenome index and keeps reads that do **not** map to the decoys.
 4. Uses `bowtie2` again to map decoy-unmapped reads to the bacterial reference index, retaining the reads that also fail this second alignment. When `HOST_BOWTIE2_INDEX` is set, only those reads that mapped to neither the decoy nor the bacterium are mapped to the host index.
-5. Uses `featureCounts` from Subread to assign aligned reads to CDS features in the configured bacterial GFF3 annotation and, when `HOST_GFF3` is set, independently counts the host alignments against the host annotation.
+5. Uses `featureCounts` from Subread to assign aligned reads to CDS features in the bacterial GFF annotation sharing the reference basename and, when host mapping is enabled, independently counts host alignments against the matching host annotation.
 6. Uses `samtools` to create, sort, and calculate coverage from BAM files.
 7. Runs `bacteria_with_decoys_csvConversion.py` to combine cutadapt, bowtie2, coverage, and featureCounts outputs into `BACTERIA_<project-directory>.csv`.
 
@@ -50,22 +50,20 @@ Edit `config.env` before running the pipeline. The key settings are:
 | `SAMPLE_SIZE` | Maximum reads sampled from each FASTQ (default: `5000`). |
 | `SAMPLE_SEED` | Seed used to make random sampling reproducible. |
 | `DECOY_BOWTIE2_INDEX` | Bowtie2 index basename for the decoy/pangenome reference. |
-| `BACTERIA_BOWTIE2_INDEX` | Bowtie2 index basename for the bacterial reference. |
-| `BACTERIA_GFF3` | Bacterial GFF3 annotation file used by featureCounts. |
-| `HOST_BOWTIE2_INDEX` | Optional Bowtie2 index basename for the host reference; leave empty to disable host mapping. |
-| `HOST_GFF3` | Optional host GFF3 annotation used by featureCounts; requires `HOST_BOWTIE2_INDEX`. |
+| `BACTERIA_BOWTIE2_INDEX` | Shared basename for the bacterial Bowtie2 index (or FASTA) and GFF annotation. |
+| `HOST_BOWTIE2_INDEX` | Optional shared basename for the host index (or FASTA) and GFF annotation; leave empty to disable host mapping and counting. |
 | `ADAPTER_SEQUENCE` | Adapter sequence passed to cutadapt. |
 | `MIN_READ_LENGTH` | Minimum read length retained by cutadapt. |
-| `*_THREADS` | Thread counts for each tool. |
+| `THREADS` | Number of threads used by every multithreaded step (default: `16`). |
 | `CSV_CONVERSION_SCRIPT` | Path to `bacteria_with_decoys_csvConversion.py`. |
 
 ### Quick sampling mode
 
 Set `SAMPLE_READS="true"` in `config.env` for a quick exploratory run. Before trimming or mapping, the pipeline uses reservoir sampling to select up to `SAMPLE_SIZE` complete read records independently from each FASTQ file. Files with 5,000 reads or fewer are used in full with the default setting. The temporary sampled inputs are written under `OUTPUT_DIR/.bacteria_sampled_fastq`; original FASTQ files are never modified. Sampling is reproducible for the same input path and `SAMPLE_SEED`. Set `SAMPLE_READS="false"` for a full analysis.
 
-The Bowtie2 index settings should be the index basename, not an individual `.bt2` file. For example, use `/refs/bacteria_reference` if the files are named `/refs/bacteria_reference.1.bt2`, `/refs/bacteria_reference.2.bt2`, and so on. For every configured decoy, bacterial, or host basename, the pipeline first reuses a complete `.bt2` or `.bt2l` index. If no complete index exists, it looks beside that basename for `.fa`, `.fasta`, or `.fna` (optionally gzip-compressed) and builds the index at the configured basename. It exits with a clear error before trimming reads when neither an index nor a matching FASTA exists.
+The Bowtie2 index settings should be the index basename, not an individual `.bt2` file. For example, use `/refs/bacteria_reference` if the files are named `/refs/bacteria_reference.1.bt2`, `/refs/bacteria_reference.2.bt2`, and so on. For every configured decoy, bacterial, or host basename, the pipeline first reuses a complete `.bt2` or `.bt2l` index. If no complete index exists, it looks beside that basename for `.fa`, `.fasta`, or `.fna` (optionally gzip-compressed) and builds the index at the configured basename. The bacterial and host annotations are discovered from the same basename using `.gff*`, which supports names such as `bacteria_reference.gff` and `bacteria_reference.gff3`. Exactly one matching annotation must exist. For feature counting, the pipeline uses the annotation's `locus` attribute as the gene identifier, or automatically falls back to `locus_tag` when `locus` is unavailable. It exits with a clear error before trimming reads when required reference inputs or identifier attributes are missing or ambiguous.
 
-To enable host mapping, set `HOST_BOWTIE2_INDEX` to the host index basename (or place a matching FASTA beside that basename so the pipeline can build it); setting it to `""` skips both index preparation and host alignment. Host Bowtie2 input consists exclusively of reads that did not align to either the decoy or bacterial reference. To also count reads assigned to host CDS features, set `HOST_GFF3` to a readable annotation file. Host feature counting runs only when `HOST_GFF3` is set, and its outputs remain separate from the bacterial counts under `bowtie_alignments/host`.
+To enable host mapping and feature counting, set `HOST_BOWTIE2_INDEX` to the shared host reference basename (or place a matching FASTA beside that basename so the pipeline can build it) and provide a matching `.gff*` annotation. Setting it to `""` skips host index preparation, alignment, and counting. Host Bowtie2 input consists exclusively of reads that did not align to either the decoy or bacterial reference, and host count outputs remain separate from bacterial counts under `bowtie_alignments/host`.
 
 ## Run the pipeline
 

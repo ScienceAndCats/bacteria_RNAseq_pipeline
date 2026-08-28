@@ -19,18 +19,75 @@ source "$CONFIG_FILE"
 : "${SAMPLE_SEED:=1}"
 : "${DECOY_BOWTIE2_INDEX:?Set DECOY_BOWTIE2_INDEX in $CONFIG_FILE}"
 : "${BACTERIA_BOWTIE2_INDEX:?Set BACTERIA_BOWTIE2_INDEX in $CONFIG_FILE}"
-: "${BACTERIA_GFF3:?Set BACTERIA_GFF3 in $CONFIG_FILE}"
 : "${HOST_BOWTIE2_INDEX:=}"
-: "${HOST_GFF3:=}"
 : "${ADAPTER_SEQUENCE:=AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC}"
 : "${MIN_READ_LENGTH:=22}"
-: "${CUTADAPT_THREADS:=40}"
-: "${BOWTIE2_DECOY_THREADS:=24}"
-: "${BOWTIE2_BACTERIA_THREADS:=16}"
-: "${BOWTIE2_HOST_THREADS:=16}"
-: "${FEATURECOUNTS_THREADS:=24}"
-: "${SAMTOOLS_THREADS:=16}"
+: "${THREADS:=16}"
 : "${CSV_CONVERSION_SCRIPT:=bacteria_with_decoys_csvConversion.py}"
+
+[[ "$THREADS" =~ ^[1-9][0-9]*$ ]] || { echo "THREADS must be a positive integer" >&2; exit 1; }
+
+shopt -s nullglob
+
+# Locate the single annotation whose filename starts with the reference
+# basename and a .gff suffix (for example, reference.gff or reference.gff3).
+find_gff_annotation() {
+  local reference_basename="$1"
+  local reference_label="$2"
+  local candidates=("${reference_basename}".gff*)
+
+  if (( ${#candidates[@]} == 0 )); then
+    echo "ERROR: $reference_label annotation not found; expected ${reference_basename}.gff*" >&2
+    return 1
+  fi
+  if (( ${#candidates[@]} > 1 )); then
+    echo "ERROR: Multiple $reference_label annotations match ${reference_basename}.gff*: ${candidates[*]}" >&2
+    return 1
+  fi
+  printf '%s\n' "${candidates[0]}"
+}
+
+# Prefer the locus attribute for featureCounts gene IDs, falling back to the
+# commonly used locus_tag attribute when locus does not occur in the GFF.
+find_gene_identifier_attribute() {
+  local annotation_file="$1"
+
+  if [[ "$annotation_file" == *.gz ]]; then
+    gzip -cd -- "$annotation_file"
+  else
+    cat -- "$annotation_file"
+  fi | awk -F '\t' '
+    !/^#/ && NF >= 9 {
+      attribute_count = split($9, attributes, ";")
+      for (i = 1; i <= attribute_count; i++) {
+        sub(/^[[:space:]]+/, "", attributes[i])
+        split(attributes[i], parts, /[=[:space:]]/)
+        if (parts[1] == "locus") has_locus = 1
+        if (parts[1] == "locus_tag") has_locus_tag = 1
+      }
+    }
+    END {
+      if (has_locus) print "locus"
+      else if (has_locus_tag) print "locus_tag"
+      else exit 1
+    }
+  '
+}
+
+BACTERIA_GFF=$(find_gff_annotation "$BACTERIA_BOWTIE2_INDEX" "bacterial")
+if ! BACTERIA_GENE_ATTRIBUTE=$(find_gene_identifier_attribute "$BACTERIA_GFF"); then
+  echo "ERROR: bacterial annotation has neither a locus nor locus_tag attribute: $BACTERIA_GFF" >&2
+  exit 1
+fi
+HOST_GFF=""
+HOST_GENE_ATTRIBUTE=""
+if [[ -n "$HOST_BOWTIE2_INDEX" ]]; then
+  HOST_GFF=$(find_gff_annotation "$HOST_BOWTIE2_INDEX" "host")
+  if ! HOST_GENE_ATTRIBUTE=$(find_gene_identifier_attribute "$HOST_GFF"); then
+    echo "ERROR: host annotation has neither a locus nor locus_tag attribute: $HOST_GFF" >&2
+    exit 1
+  fi
+fi
 
 ALIGNMENT_DIR="$OUTPUT_DIR/bowtie_alignments"
 DECOY_ALIGNMENT_DIR="$ALIGNMENT_DIR/decoy"
@@ -39,10 +96,6 @@ HOST_ALIGNMENT_DIR="$ALIGNMENT_DIR/host"
 mkdir -p "$OUTPUT_DIR" "$DECOY_ALIGNMENT_DIR" "$BACTERIA_ALIGNMENT_DIR"
 if [[ -n "$HOST_BOWTIE2_INDEX" ]]; then
   mkdir -p "$HOST_ALIGNMENT_DIR"
-fi
-if [[ -n "$HOST_GFF3" ]]; then
-  [[ -n "$HOST_BOWTIE2_INDEX" ]] || { echo "HOST_GFF3 requires HOST_BOWTIE2_INDEX to enable host alignment" >&2; exit 1; }
-  [[ -f "$HOST_GFF3" ]] || { echo "HOST_GFF3 not found: $HOST_GFF3" >&2; exit 1; }
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "$CSV_CONVERSION_SCRIPT" != /* ]]; then
@@ -87,13 +140,12 @@ prepare_bowtie2_index() {
   bowtie2-build --threads "$threads" "$fasta_file" "$index_basename"
 }
 
-prepare_bowtie2_index "$DECOY_BOWTIE2_INDEX" "decoy" "$BOWTIE2_DECOY_THREADS"
-prepare_bowtie2_index "$BACTERIA_BOWTIE2_INDEX" "bacterial" "$BOWTIE2_BACTERIA_THREADS"
+prepare_bowtie2_index "$DECOY_BOWTIE2_INDEX" "decoy" "$THREADS"
+prepare_bowtie2_index "$BACTERIA_BOWTIE2_INDEX" "bacterial" "$THREADS"
 if [[ -n "$HOST_BOWTIE2_INDEX" ]]; then
-  prepare_bowtie2_index "$HOST_BOWTIE2_INDEX" "host" "$BOWTIE2_HOST_THREADS"
+  prepare_bowtie2_index "$HOST_BOWTIE2_INDEX" "host" "$THREADS"
 fi
 
-shopt -s nullglob
 fastq_filenames=("$FASTQ_DIR"/$FASTQ_GLOB)
 if (( ${#fastq_filenames[@]} == 0 )); then
   echo "No FASTQ files found in $FASTQ_DIR matching $FASTQ_GLOB" >&2
@@ -163,7 +215,7 @@ for i in "${fastq_filenames[@]}"
 do
   i_basename=$(basename "$i" .fastq)
   echo "trimming adapters from $i_basename ..."
-  cutadapt -m "$MIN_READ_LENGTH" -j "$CUTADAPT_THREADS" -a "$ADAPTER_SEQUENCE" \
+  cutadapt -m "$MIN_READ_LENGTH" -j "$THREADS" -a "$ADAPTER_SEQUENCE" \
     -o "$OUTPUT_DIR/${i_basename}_${MIN_READ_LENGTH}bp.trim.fastq" "$i" \
     > "$OUTPUT_DIR/${i_basename}_${MIN_READ_LENGTH}bp.cutadapt_log.txt"
 done
@@ -174,7 +226,7 @@ for i in "${trim_filenames[@]}"
 do
   i_basename=$(basename "$i" .trim.fastq)
   echo "mapping to bacterial decoys: $i_basename ..."
-  bowtie2 -p "$BOWTIE2_DECOY_THREADS" -x "$DECOY_BOWTIE2_INDEX" -U "$i" \
+  bowtie2 -p "$THREADS" -x "$DECOY_BOWTIE2_INDEX" -U "$i" \
     -S "$DECOY_ALIGNMENT_DIR/${i_basename}.mapped_to_other_bugs.sam" \
     --un-gz "$DECOY_ALIGNMENT_DIR/${i_basename}_unmapped_to_other_bugs.fastq.gz" \
     2> "$DECOY_ALIGNMENT_DIR/${i_basename}.mapped_to_other_bugs.bowtie2.txt"
@@ -188,7 +240,7 @@ do
   i_basename=$(basename "$i" .fastq.gz)
   host_input="$BACTERIA_ALIGNMENT_DIR/${i_basename}_unmapped_to_bacteria.fastq.gz"
   echo "mapping to the bacterial reference: $i_basename ..."
-  bowtie2 --end-to-end -p "$BOWTIE2_BACTERIA_THREADS" -x "$BACTERIA_BOWTIE2_INDEX" -q -U "$i" \
+  bowtie2 --end-to-end -p "$THREADS" -x "$BACTERIA_BOWTIE2_INDEX" -q -U "$i" \
     -S "$BACTERIA_ALIGNMENT_DIR/BACTERIA_${i_basename}.sam" \
     --un-gz "$host_input" \
     2> "$BACTERIA_ALIGNMENT_DIR/BACTERIA_${i_basename}.bowtie_output.txt"
@@ -203,7 +255,7 @@ if [[ -n "$HOST_BOWTIE2_INDEX" ]]; then
   for i in "${HOST_trim_filenames[@]}"; do
     i_basename=$(basename "$i" .fastq.gz)
     echo "mapping to the host reference: $i_basename ..."
-    bowtie2 --end-to-end -p "$BOWTIE2_HOST_THREADS" -x "$HOST_BOWTIE2_INDEX" -q -U "$i" \
+    bowtie2 --end-to-end -p "$THREADS" -x "$HOST_BOWTIE2_INDEX" -q -U "$i" \
       -S "$HOST_ALIGNMENT_DIR/HOST_${i_basename}.sam" \
       2> "$HOST_ALIGNMENT_DIR/HOST_${i_basename}.bowtie_output.txt"
   done
@@ -212,15 +264,15 @@ fi
 # Create featureCounts summary file.
 # Assign mapped reads to bacterial genes, retaining the pipeline's stranded and
 # overlapping-feature behavior.
-featureCounts -T "$FEATURECOUNTS_THREADS" -a "$BACTERIA_GFF3" -O -s 1 -g locus -t CDS \
+featureCounts -T "$THREADS" -a "$BACTERIA_GFF" -O -s 1 -g "$BACTERIA_GENE_ATTRIBUTE" -t CDS \
   -o "$OUTPUT_DIR/featurecounts_BACTERIA_summary.txt" "${BACTERIA_sam_filenames[@]}"
 sed 's/\t/,/g' "$OUTPUT_DIR/featurecounts_BACTERIA_summary.txt" > "$OUTPUT_DIR/featurecounts_BACTERIA_summary.csv"
 
-# When a host annotation is configured, independently assign host alignments to
+# When a host reference is configured, independently assign host alignments to
 # its CDS features and keep the results alongside the host Bowtie2 outputs.
-if [[ -n "$HOST_GFF3" ]]; then
+if [[ -n "$HOST_GFF" ]]; then
   HOST_sam_filenames=("$HOST_ALIGNMENT_DIR"/HOST_*.sam)
-  featureCounts -T "$FEATURECOUNTS_THREADS" -a "$HOST_GFF3" -O -s 1 -g locus -t CDS \
+  featureCounts -T "$THREADS" -a "$HOST_GFF" -O -s 1 -g "$HOST_GENE_ATTRIBUTE" -t CDS \
     -o "$HOST_ALIGNMENT_DIR/featurecounts_HOST_summary.txt" "${HOST_sam_filenames[@]}"
   sed 's/\t/,/g' "$HOST_ALIGNMENT_DIR/featurecounts_HOST_summary.txt" \
     > "$HOST_ALIGNMENT_DIR/featurecounts_HOST_summary.csv"
@@ -231,10 +283,10 @@ for i in "${BACTERIA_sam_filenames[@]}"
 do
     i_basename=$(basename "$i" .sam)
     echo "analyzing $i_basename ..."
-    samtools view -@ "$SAMTOOLS_THREADS" -bS "$i" > "$BACTERIA_ALIGNMENT_DIR/${i_basename}.bam"
-    samtools sort -@ "$SAMTOOLS_THREADS" -o "$BACTERIA_ALIGNMENT_DIR/${i_basename}.sorted.bam" "$BACTERIA_ALIGNMENT_DIR/${i_basename}.bam"
-    samtools coverage -mA "$BACTERIA_ALIGNMENT_DIR/${i_basename}.sorted.bam"
-    samtools coverage -m -o "$BACTERIA_ALIGNMENT_DIR/${i_basename}_coverage.txt" "$BACTERIA_ALIGNMENT_DIR/${i_basename}.sorted.bam"
+    samtools view -@ "$THREADS" -bS "$i" > "$BACTERIA_ALIGNMENT_DIR/${i_basename}.bam"
+    samtools sort -@ "$THREADS" -o "$BACTERIA_ALIGNMENT_DIR/${i_basename}.sorted.bam" "$BACTERIA_ALIGNMENT_DIR/${i_basename}.bam"
+    samtools coverage -@ "$THREADS" -mA "$BACTERIA_ALIGNMENT_DIR/${i_basename}.sorted.bam"
+    samtools coverage -@ "$THREADS" -m -o "$BACTERIA_ALIGNMENT_DIR/${i_basename}_coverage.txt" "$BACTERIA_ALIGNMENT_DIR/${i_basename}.sorted.bam"
 done
 
 # Run python script to convert results to csv file.
