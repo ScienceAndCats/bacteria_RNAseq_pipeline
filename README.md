@@ -18,13 +18,13 @@ The Python conversion script uses only the Python standard library.
 
 ## Dependencies
 
-The pipeline expects these command-line tools:
+The pipeline environment pins these command-line tools:
 
-- Python 3.9 or newer
-- cutadapt
-- bowtie2
-- samtools
-- Subread / featureCounts
+- Python 3.13.5
+- cutadapt 5.1
+- bowtie2 2.5.4
+- samtools 1.22.1
+- Subread / featureCounts 2.1.1
 
 A conda environment file is provided in `environment.yml`.
 
