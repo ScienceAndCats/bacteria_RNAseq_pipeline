@@ -47,8 +47,8 @@ find_gff_annotation() {
   printf '%s\n' "${candidates[0]}"
 }
 
-# Prefer the locus attribute for featureCounts gene IDs, falling back to the
-# commonly used locus_tag attribute when locus does not occur in the GFF.
+# Prefer the locus attribute for featureCounts gene IDs, falling back first to
+# locus_tag and then to gene when the preferred attributes do not occur.
 find_gene_identifier_attribute() {
   local annotation_file="$1"
 
@@ -64,11 +64,13 @@ find_gene_identifier_attribute() {
         split(attributes[i], parts, /[=[:space:]]/)
         if (parts[1] == "locus") has_locus = 1
         if (parts[1] == "locus_tag") has_locus_tag = 1
+        if (parts[1] == "gene") has_gene = 1
       }
     }
     END {
       if (has_locus) print "locus"
       else if (has_locus_tag) print "locus_tag"
+      else if (has_gene) print "gene"
       else exit 1
     }
   '
@@ -76,7 +78,7 @@ find_gene_identifier_attribute() {
 
 BACTERIA_GFF=$(find_gff_annotation "$BACTERIA_BOWTIE2_INDEX" "bacterial")
 if ! BACTERIA_GENE_ATTRIBUTE=$(find_gene_identifier_attribute "$BACTERIA_GFF"); then
-  echo "ERROR: bacterial annotation has neither a locus nor locus_tag attribute: $BACTERIA_GFF" >&2
+  echo "ERROR: bacterial annotation has none of the locus, locus_tag, or gene attributes: $BACTERIA_GFF" >&2
   exit 1
 fi
 HOST_GFF=""
@@ -84,7 +86,7 @@ HOST_GENE_ATTRIBUTE=""
 if [[ -n "$HOST_BOWTIE2_INDEX" ]]; then
   HOST_GFF=$(find_gff_annotation "$HOST_BOWTIE2_INDEX" "host")
   if ! HOST_GENE_ATTRIBUTE=$(find_gene_identifier_attribute "$HOST_GFF"); then
-    echo "ERROR: host annotation has neither a locus nor locus_tag attribute: $HOST_GFF" >&2
+    echo "ERROR: host annotation has none of the locus, locus_tag, or gene attributes: $HOST_GFF" >&2
     exit 1
   fi
 fi
