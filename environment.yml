@@ -1,4 +1,4 @@
-name: whiteley-bacteria-pipeline
+name: bacteria-RNAseq-pipeline
 channels:
   - conda-forge
   - bioconda
