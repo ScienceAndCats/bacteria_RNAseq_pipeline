@@ -353,6 +353,11 @@ featurecounts_pair_args=(); [[ "$READ_LAYOUT" == "paired" ]] && featurecounts_pa
 featureCounts -T "$THREADS" -a "$BACTERIA_GFF" -O -s 1 "${featurecounts_pair_args[@]}" -g "$BACTERIA_GENE_ATTRIBUTE" -t CDS \
   -o "$OUTPUT_DIR/featurecounts_BACTERIA_summary.txt" "${BACTERIA_sam_filenames[@]}"
 sed 's/\t/,/g' "$OUTPUT_DIR/featurecounts_BACTERIA_summary.txt" > "$OUTPUT_DIR/featurecounts_BACTERIA_summary.csv"
+# Count alignments assigned to an rRNA annotation separately.  The generated
+# .summary file supplies the non-duplicated Assigned total used by the read
+# disposition CSV; all other bacterial alignments are reported as non-rRNA.
+featureCounts -T "$THREADS" -a "$BACTERIA_GFF" -s 1 "${featurecounts_pair_args[@]}" -g "$BACTERIA_GENE_ATTRIBUTE" -t rRNA \
+  -o "$OUTPUT_DIR/featurecounts_BACTERIA_rRNA.txt" "${BACTERIA_sam_filenames[@]}"
 
 # When a host reference is configured, independently assign host alignments to
 # its CDS features and keep the results alongside the host Bowtie2 outputs.
@@ -362,6 +367,8 @@ if [[ -n "$HOST_GFF" ]]; then
     -o "$HOST_ALIGNMENT_DIR/featurecounts_HOST_summary.txt" "${HOST_sam_filenames[@]}"
   sed 's/\t/,/g' "$HOST_ALIGNMENT_DIR/featurecounts_HOST_summary.txt" \
     > "$HOST_ALIGNMENT_DIR/featurecounts_HOST_summary.csv"
+  featureCounts -T "$THREADS" -a "$HOST_GFF" -s 1 "${featurecounts_pair_args[@]}" -g "$HOST_GENE_ATTRIBUTE" -t rRNA \
+    -o "$HOST_ALIGNMENT_DIR/featurecounts_HOST_rRNA.txt" "${HOST_sam_filenames[@]}"
 fi
 
 # Calculate coverage with respect to the bacterial reference with samtools.
@@ -379,4 +386,5 @@ done
 (
   cd "$OUTPUT_DIR"
   python3 "$CSV_CONVERSION_SCRIPT"
+  python3 "$SCRIPT_DIR/read_breakdown_csv.py"
 )
