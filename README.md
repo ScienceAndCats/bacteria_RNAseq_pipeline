@@ -13,6 +13,7 @@ This repository contains a single- and paired-end FASTQ processing pipeline for 
 5. Uses `featureCounts` from Subread to assign aligned reads to CDS features in the bacterial GFF annotation sharing the reference basename and, when host mapping is enabled, independently counts host alignments against the matching host annotation.
 6. Uses `samtools` to create, sort, and calculate coverage from BAM files.
 7. Runs `bacteria_with_decoys_csvConversion.py` to combine cutadapt, bowtie2, coverage, and featureCounts outputs into `BACTERIA_<project-directory>.csv`.
+8. Writes `BACTERIA_<project-directory>_read_breakdown.csv`, with one sample per row and read counts, percentages of total reads, and the source of every value.
 
 The Python conversion script uses only the Python standard library.
 
@@ -96,6 +97,7 @@ bash map_bacteria_with_decoys.sh configs/project_a.env
 - `bowtie_alignments/host/featurecounts_HOST_summary.txt` and `.csv` — optional, separate host featureCounts results.
 - `bowtie_alignments/bacteria/BACTERIA_*_coverage.txt` — samtools coverage reports.
 - `BACTERIA_<project-directory>.csv` — combined summary table.
+- `BACTERIA_<project-directory>_read_breakdown.csv` — per-sample read disposition. Each attribute has a raw count, a percentage of total input reads, and a source column. Bacterial and host non-rRNA values are the corresponding aligned counts minus reads assigned to an `rRNA` feature. Leftover reads passed cutadapt but aligned to none of the decoy, bacterial, or host references.
 
 ## Notes
 
