@@ -1,6 +1,6 @@
 # Whiteley Bacteria Mapping Pipeline
 
-This repository contains a single-end FASTQ processing pipeline for bacterial sequencing runs. The pipeline trims adapters, removes reads that map to a decoy/pangenome reference, maps the remaining reads to a configurable bacterial reference genome, counts gene-level alignments, calculates bacterial coverage metrics, and writes a project-level CSV summary.
+This repository contains a single- and paired-end FASTQ processing pipeline for bacterial sequencing runs. The pipeline trims adapters, removes reads that map to a decoy/pangenome reference, maps the remaining reads to a configurable bacterial reference genome, counts gene-level alignments, calculates bacterial coverage metrics, and writes a project-level CSV summary.
 
 ## What the program does
 
@@ -45,6 +45,7 @@ Edit `config.env` before running the pipeline. The key settings are:
 | --- | --- |
 | `FASTQ_DIR` | Directory containing input FASTQ files. |
 | `FASTQ_GLOB` | Shell glob for FASTQ inputs, such as `*.fastq`. |
+| `READ_LAYOUT` | `single` (default) or `paired`; paired files must be named `<sample>_R1.fastq[.gz]` and `<sample>_R2.fastq[.gz]`. |
 | `OUTPUT_DIR` | Directory where output files should be written. |
 | `SAMPLE_READS` | Set to `true` to analyze a random subset of each input, or `false` to analyze every read. |
 | `SAMPLE_SIZE` | Maximum reads sampled from each FASTQ (default: `5000`). |
@@ -52,14 +53,19 @@ Edit `config.env` before running the pipeline. The key settings are:
 | `DECOY_BOWTIE2_INDEX` | Bowtie2 index basename for the decoy/pangenome reference. |
 | `BACTERIA_BOWTIE2_INDEX` | Shared basename for the bacterial Bowtie2 index (or FASTA) and GFF annotation. |
 | `HOST_BOWTIE2_INDEX` | Optional shared basename for the host index (or FASTA) and GFF annotation; leave empty to disable host mapping and counting. |
-| `ADAPTER_SEQUENCE` | Adapter sequence passed to cutadapt. |
+| `ADAPTER_SINGLE` | Adapter passed to cutadapt for single-end reads. |
+| `ADAPTER_R1`, `ADAPTER_R2` | Mate-specific paired-end adapters (both default to `CTGTCTCTTATACACATCT`). |
 | `MIN_READ_LENGTH` | Minimum read length retained by cutadapt. |
 | `THREADS` | Number of threads used by every multithreaded step (default: `16`). |
 | `CSV_CONVERSION_SCRIPT` | Path to `bacteria_with_decoys_csvConversion.py`. |
 
 ### Quick sampling mode
 
-Set `SAMPLE_READS="true"` in `config.env` for a quick exploratory run. Before trimming or mapping, the pipeline uses reservoir sampling to select up to `SAMPLE_SIZE` complete read records independently from each FASTQ file. Files with 5,000 reads or fewer are used in full with the default setting. The temporary sampled inputs are written under `OUTPUT_DIR/.bacteria_sampled_fastq`; original FASTQ files are never modified. Sampling is reproducible for the same input path and `SAMPLE_SEED`. Set `SAMPLE_READS="false"` for a full analysis.
+Set `SAMPLE_READS="true"` in `config.env` for a quick exploratory run. Before trimming or mapping, the pipeline uses reservoir sampling to select up to `SAMPLE_SIZE` complete read records. For paired input it selects the same record positions from both mates and verifies that their record counts agree. Files with 5,000 reads or fewer are used in full with the default setting. The temporary sampled inputs are written under `OUTPUT_DIR/.bacteria_sampled_fastq`; original FASTQ files are never modified. Sampling is reproducible for the same input paths and `SAMPLE_SEED`. Set `SAMPLE_READS="false"` for a full analysis.
+
+### Paired-end input
+
+Set `READ_LAYOUT="paired"` and place matching mates in `FASTQ_DIR`, for example `sample_R1.fastq.gz` and `sample_R2.fastq.gz`. The pipeline fails early when either mate is missing. Cutadapt receives both inputs with `-a`/`-A` and `-o`/`-p`; each Bowtie2 stage receives the pair with `-1`/`-2` and preserves concordant unmapped pairs for the next stage. FeatureCounts counts fragments rather than individual mates in paired mode.
 
 The Bowtie2 index settings should be the index basename, not an individual `.bt2` file. For example, use `/refs/bacteria_reference` if the files are named `/refs/bacteria_reference.1.bt2`, `/refs/bacteria_reference.2.bt2`, and so on. For every configured decoy, bacterial, or host basename, the pipeline first reuses a complete `.bt2` or `.bt2l` index. If no complete index exists, it looks beside that basename for `.fa`, `.fasta`, or `.fna` (optionally gzip-compressed) and builds the index at the configured basename. The bacterial and host annotations are discovered from the same basename using `.gff*`, which supports names such as `bacteria_reference.gff` and `bacteria_reference.gff3`. Exactly one matching annotation must exist. For feature counting, the pipeline uses the annotation's `locus` attribute as the gene identifier, automatically falling back to `locus_tag` and then `gene` when the preferred attributes are unavailable. It exits with a clear error before trimming reads when required reference inputs or identifier attributes are missing or ambiguous.
 
@@ -81,7 +87,7 @@ bash map_bacteria_with_decoys.sh configs/project_a.env
 
 ## Important outputs
 
-- `*_22bp.trim.fastq` — adapter-trimmed FASTQ files.
+- `*_22bp.trim.fastq` (single) or `*_R{1,2}_22bp.trim.fastq` (paired) — adapter-trimmed FASTQ files.
 - `bowtie_alignments/decoy/` — decoy SAM files, Bowtie2 logs, and decoy-unmapped reads.
 - `bowtie_alignments/bacteria/` — bacterial SAM/BAM files, Bowtie2 logs, and coverage reports.
 - `bowtie_alignments/bacteria/*_unmapped_to_bacteria.fastq.gz` — reads that mapped to neither the decoy nor bacterial reference and are used as the optional host-alignment input.
@@ -93,6 +99,5 @@ bash map_bacteria_with_decoys.sh configs/project_a.env
 
 ## Notes
 
-- The pipeline is currently designed for single-end FASTQ files.
-- It assumes input files end in `.fastq` unless `FASTQ_GLOB` is changed.
+- Input files must end in `.fastq` or `.fastq.gz`; use `FASTQ_GLOB` to narrow which files are selected.
 - Ensure the configured bacterial reference and annotation use compatible genome versions.

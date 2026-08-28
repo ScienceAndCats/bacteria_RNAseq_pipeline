@@ -13,6 +13,7 @@ source "$CONFIG_FILE"
 
 : "${FASTQ_DIR:=.}"
 : "${FASTQ_GLOB:=*.fastq}"
+: "${READ_LAYOUT:=single}"
 : "${OUTPUT_DIR:=.}"
 : "${SAMPLE_READS:=false}"
 : "${SAMPLE_SIZE:=5000}"
@@ -20,12 +21,15 @@ source "$CONFIG_FILE"
 : "${DECOY_BOWTIE2_INDEX:?Set DECOY_BOWTIE2_INDEX in $CONFIG_FILE}"
 : "${BACTERIA_BOWTIE2_INDEX:?Set BACTERIA_BOWTIE2_INDEX in $CONFIG_FILE}"
 : "${HOST_BOWTIE2_INDEX:=}"
-: "${ADAPTER_SEQUENCE:=AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC}"
+: "${ADAPTER_SINGLE:=${ADAPTER_SEQUENCE:-AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC}}"
+: "${ADAPTER_R1:=CTGTCTCTTATACACATCT}"
+: "${ADAPTER_R2:=CTGTCTCTTATACACATCT}"
 : "${MIN_READ_LENGTH:=22}"
 : "${THREADS:=16}"
 : "${CSV_CONVERSION_SCRIPT:=bacteria_with_decoys_csvConversion.py}"
 
 [[ "$THREADS" =~ ^[1-9][0-9]*$ ]] || { echo "THREADS must be a positive integer" >&2; exit 1; }
+[[ "$READ_LAYOUT" == "single" || "$READ_LAYOUT" == "paired" ]] || { echo "READ_LAYOUT must be single or paired" >&2; exit 1; }
 
 shopt -s nullglob
 
@@ -148,10 +152,29 @@ if [[ -n "$HOST_BOWTIE2_INDEX" ]]; then
   prepare_bowtie2_index "$HOST_BOWTIE2_INDEX" "host" "$THREADS"
 fi
 
-fastq_filenames=("$FASTQ_DIR"/$FASTQ_GLOB)
-if (( ${#fastq_filenames[@]} == 0 )); then
+matched_fastqs=("$FASTQ_DIR"/$FASTQ_GLOB)
+if (( ${#matched_fastqs[@]} == 0 )); then
   echo "No FASTQ files found in $FASTQ_DIR matching $FASTQ_GLOB" >&2
   exit 1
+fi
+
+read1_filenames=()
+read2_filenames=()
+if [[ "$READ_LAYOUT" == "paired" ]]; then
+  for i in "${matched_fastqs[@]}"; do
+    if [[ "$i" =~ _R1\.fastq(\.gz)?$ ]]; then
+      mate="${i/_R1.fastq/_R2.fastq}"
+      [[ -f "$mate" ]] || { echo "ERROR: Missing R2 mate for $i (expected $mate)" >&2; exit 1; }
+      read1_filenames+=("$i")
+      read2_filenames+=("$mate")
+    elif [[ "$i" =~ _R2\.fastq(\.gz)?$ ]]; then
+      mate="${i/_R2.fastq/_R1.fastq}"
+      [[ -f "$mate" ]] || { echo "ERROR: Missing R1 mate for $i (expected $mate)" >&2; exit 1; }
+    fi
+  done
+  (( ${#read1_filenames[@]} > 0 )) || { echo "No paired FASTQs named *_R1.fastq[.gz] and *_R2.fastq[.gz] found" >&2; exit 1; }
+else
+  read1_filenames=("${matched_fastqs[@]}")
 fi
 
 # Randomly subsample complete FASTQ records with reservoir sampling. This keeps
@@ -193,60 +216,119 @@ with open(output_path, "w") as destination:
 PY
 }
 
+# Sample the same record numbers from both mates so pairing is preserved.
+sample_fastq_pair() {
+  python3 - "$1" "$2" "$3" "$4" "$SAMPLE_SIZE" "$SAMPLE_SEED" <<'PY'
+import gzip, hashlib, random, sys
+r1, r2, out1, out2, size, seed = sys.argv[1:]
+size = int(size)
+opener = lambda path: gzip.open(path, "rt") if path.endswith(".gz") else open(path, "r")
+rng = random.Random(f"{seed}:{hashlib.sha256((r1 + ':' + r2).encode()).hexdigest()}")
+reservoir = []
+with opener(r1) as first, opener(r2) as second:
+    count = 0
+    while True:
+        a, b = [first.readline() for _ in range(4)], [second.readline() for _ in range(4)]
+        if not a[0] and not b[0]: break
+        if not a[0] or not b[0] or any(x == "" for x in a + b):
+            raise SystemExit(f"Mates have unequal or incomplete FASTQ records: {r1}, {r2}")
+        if count < size: reservoir.append((a, b))
+        else:
+            replacement = rng.randrange(count + 1)
+            if replacement < size: reservoir[replacement] = (a, b)
+        count += 1
+with open(out1, "w") as first, open(out2, "w") as second:
+    for a, b in reservoir: first.writelines(a); second.writelines(b)
+PY
+}
+
 case "${SAMPLE_READS,,}" in
   true)
     [[ "$SAMPLE_SIZE" =~ ^[1-9][0-9]*$ ]] || { echo "SAMPLE_SIZE must be a positive integer" >&2; exit 1; }
     sample_dir="$OUTPUT_DIR/.bacteria_sampled_fastq"
     rm -rf "$sample_dir"
     mkdir -p "$sample_dir"
-    sampled_filenames=()
-    for i in "${fastq_filenames[@]}"; do
-      sampled_file="$sample_dir/$(basename "${i%.gz}")"
-      echo "sampling up to $SAMPLE_SIZE reads from $(basename "$i") ..."
-      sample_fastq "$i" "$sampled_file"
-      sampled_filenames+=("$sampled_file")
+    sampled_r1=(); sampled_r2=()
+    for idx in "${!read1_filenames[@]}"; do
+      out1="$sample_dir/$(basename "${read1_filenames[$idx]%.gz}")"
+      if [[ "$READ_LAYOUT" == "paired" ]]; then
+        out2="$sample_dir/$(basename "${read2_filenames[$idx]%.gz}")"
+        echo "sampling up to $SAMPLE_SIZE read pairs from $(basename "${read1_filenames[$idx]}") and $(basename "${read2_filenames[$idx]}") ..."
+        sample_fastq_pair "${read1_filenames[$idx]}" "${read2_filenames[$idx]}" "$out1" "$out2"
+        sampled_r2+=("$out2")
+      else
+        echo "sampling up to $SAMPLE_SIZE reads from $(basename "${read1_filenames[$idx]}") ..."
+        sample_fastq "${read1_filenames[$idx]}" "$out1"
+      fi
+      sampled_r1+=("$out1")
     done
-    fastq_filenames=("${sampled_filenames[@]}")
+    read1_filenames=("${sampled_r1[@]}"); read2_filenames=("${sampled_r2[@]}")
     ;;
   false) ;;
   *) echo "SAMPLE_READS must be true or false" >&2; exit 1 ;;
 esac
 
-# cutadapt
-for i in "${fastq_filenames[@]}"
-do
-  i_basename=$(basename "$i" .fastq)
-  echo "trimming adapters from $i_basename ..."
-  cutadapt -m "$MIN_READ_LENGTH" -j "$THREADS" -a "$ADAPTER_SEQUENCE" \
-    -o "$OUTPUT_DIR/${i_basename}_${MIN_READ_LENGTH}bp.trim.fastq" "$i" \
-    > "$OUTPUT_DIR/${i_basename}_${MIN_READ_LENGTH}bp.cutadapt_log.txt"
+# Trim adapters while retaining paired mates together.
+trim_r1=(); trim_r2=(); sample_names=()
+for idx in "${!read1_filenames[@]}"; do
+  filename=$(basename "${read1_filenames[$idx]}"); filename=${filename%.gz}; filename=${filename%.fastq}
+  sample=${filename%_R1}
+  out1="$OUTPUT_DIR/${sample}_${MIN_READ_LENGTH}bp.trim.fastq"
+  if [[ "$READ_LAYOUT" == "paired" ]]; then
+    out1="$OUTPUT_DIR/${sample}_R1_${MIN_READ_LENGTH}bp.trim.fastq"
+    out2="$OUTPUT_DIR/${sample}_R2_${MIN_READ_LENGTH}bp.trim.fastq"
+    cutadapt -m "$MIN_READ_LENGTH" -j "$THREADS" -a "$ADAPTER_R1" -A "$ADAPTER_R2" \
+      -o "$out1" -p "$out2" "${read1_filenames[$idx]}" "${read2_filenames[$idx]}" \
+      > "$OUTPUT_DIR/${sample}_${MIN_READ_LENGTH}bp.cutadapt_log.txt"
+    trim_r2+=("$out2")
+  else
+    cutadapt -m "$MIN_READ_LENGTH" -j "$THREADS" -a "$ADAPTER_SINGLE" -o "$out1" "${read1_filenames[$idx]}" \
+      > "$OUTPUT_DIR/${sample}_${MIN_READ_LENGTH}bp.cutadapt_log.txt"
+  fi
+  trim_r1+=("$out1"); sample_names+=("$sample")
 done
 
 # Mapping to bacterial decoys.
-trim_filenames=("$OUTPUT_DIR"/*.trim.fastq)
-for i in "${trim_filenames[@]}"
-do
-  i_basename=$(basename "$i" .trim.fastq)
+decoy_r1=(); decoy_r2=()
+for idx in "${!trim_r1[@]}"; do
+  i="${trim_r1[$idx]}"; i_basename="${sample_names[$idx]}_${MIN_READ_LENGTH}bp"
   echo "mapping to bacterial decoys: $i_basename ..."
-  bowtie2 -p "$THREADS" -x "$DECOY_BOWTIE2_INDEX" -U "$i" \
+  if [[ "$READ_LAYOUT" == "paired" ]]; then
+    unmapped="$DECOY_ALIGNMENT_DIR/${i_basename}_unmapped_to_other_bugs_%.fastq.gz"
+    bowtie2 -p "$THREADS" -x "$DECOY_BOWTIE2_INDEX" -1 "$i" -2 "${trim_r2[$idx]}" \
+      -S "$DECOY_ALIGNMENT_DIR/${i_basename}.mapped_to_other_bugs.sam" --un-conc-gz "$unmapped" \
+      2> "$DECOY_ALIGNMENT_DIR/${i_basename}.mapped_to_other_bugs.bowtie2.txt"
+    decoy_r1+=("${unmapped/\%/1}"); decoy_r2+=("${unmapped/\%/2}")
+  else
+    unmapped="$DECOY_ALIGNMENT_DIR/${i_basename}_unmapped_to_other_bugs.fastq.gz"
+    bowtie2 -p "$THREADS" -x "$DECOY_BOWTIE2_INDEX" -U "$i" \
     -S "$DECOY_ALIGNMENT_DIR/${i_basename}.mapped_to_other_bugs.sam" \
-    --un-gz "$DECOY_ALIGNMENT_DIR/${i_basename}_unmapped_to_other_bugs.fastq.gz" \
+    --un-gz "$unmapped" \
     2> "$DECOY_ALIGNMENT_DIR/${i_basename}.mapped_to_other_bugs.bowtie2.txt"
+    decoy_r1+=("$unmapped")
+  fi
 done
 
 # Mapping to the target bacterial reference with Bowtie2.
-BACTERIA_trim_filenames=("$DECOY_ALIGNMENT_DIR"/*unmapped_to_other_bugs.fastq.gz)
 HOST_trim_filenames=()
-for i in "${BACTERIA_trim_filenames[@]}"
-do
-  i_basename=$(basename "$i" .fastq.gz)
-  host_input="$BACTERIA_ALIGNMENT_DIR/${i_basename}_unmapped_to_bacteria.fastq.gz"
+HOST_trim_mates=()
+for idx in "${!decoy_r1[@]}"; do
+  i="${decoy_r1[$idx]}"; i_basename="${sample_names[$idx]}_${MIN_READ_LENGTH}bp"
   echo "mapping to the bacterial reference: $i_basename ..."
-  bowtie2 --end-to-end -p "$THREADS" -x "$BACTERIA_BOWTIE2_INDEX" -q -U "$i" \
+  host_input="$BACTERIA_ALIGNMENT_DIR/${i_basename}_unmapped_to_bacteria.fastq.gz"
+  if [[ "$READ_LAYOUT" == "paired" ]]; then
+    host_template="$BACTERIA_ALIGNMENT_DIR/${i_basename}_unmapped_to_bacteria_%.fastq.gz"
+    bowtie2 --end-to-end -p "$THREADS" -x "$BACTERIA_BOWTIE2_INDEX" -q -1 "$i" -2 "${decoy_r2[$idx]}" \
+      -S "$BACTERIA_ALIGNMENT_DIR/BACTERIA_${i_basename}.sam" --un-conc-gz "$host_template" \
+      2> "$BACTERIA_ALIGNMENT_DIR/BACTERIA_${i_basename}.bowtie_output.txt"
+    HOST_trim_filenames+=("${host_template/\%/1}"); HOST_trim_mates+=("${host_template/\%/2}")
+  else
+    bowtie2 --end-to-end -p "$THREADS" -x "$BACTERIA_BOWTIE2_INDEX" -q -U "$i" \
     -S "$BACTERIA_ALIGNMENT_DIR/BACTERIA_${i_basename}.sam" \
     --un-gz "$host_input" \
     2> "$BACTERIA_ALIGNMENT_DIR/BACTERIA_${i_basename}.bowtie_output.txt"
-  HOST_trim_filenames+=("$host_input")
+    HOST_trim_filenames+=("$host_input")
+  fi
 done
 
 BACTERIA_sam_filenames=("$BACTERIA_ALIGNMENT_DIR"/BACTERIA*.sam)
@@ -254,10 +336,11 @@ BACTERIA_sam_filenames=("$BACTERIA_ALIGNMENT_DIR"/BACTERIA*.sam)
 # Optionally align reads that mapped to neither the decoy nor the bacterial
 # reference. An empty host index basename disables host alignment.
 if [[ -n "$HOST_BOWTIE2_INDEX" ]]; then
-  for i in "${HOST_trim_filenames[@]}"; do
-    i_basename=$(basename "$i" .fastq.gz)
+  for idx in "${!HOST_trim_filenames[@]}"; do
+    i="${HOST_trim_filenames[$idx]}"; i_basename="${sample_names[$idx]}_${MIN_READ_LENGTH}bp"
     echo "mapping to the host reference: $i_basename ..."
-    bowtie2 --end-to-end -p "$THREADS" -x "$HOST_BOWTIE2_INDEX" -q -U "$i" \
+    if [[ "$READ_LAYOUT" == "paired" ]]; then input_args=(-1 "$i" -2 "${HOST_trim_mates[$idx]}"); else input_args=(-U "$i"); fi
+    bowtie2 --end-to-end -p "$THREADS" -x "$HOST_BOWTIE2_INDEX" -q "${input_args[@]}" \
       -S "$HOST_ALIGNMENT_DIR/HOST_${i_basename}.sam" \
       2> "$HOST_ALIGNMENT_DIR/HOST_${i_basename}.bowtie_output.txt"
   done
@@ -266,7 +349,8 @@ fi
 # Create featureCounts summary file.
 # Assign mapped reads to bacterial genes, retaining the pipeline's stranded and
 # overlapping-feature behavior.
-featureCounts -T "$THREADS" -a "$BACTERIA_GFF" -O -s 1 -g "$BACTERIA_GENE_ATTRIBUTE" -t CDS \
+featurecounts_pair_args=(); [[ "$READ_LAYOUT" == "paired" ]] && featurecounts_pair_args=(-p --countReadPairs)
+featureCounts -T "$THREADS" -a "$BACTERIA_GFF" -O -s 1 "${featurecounts_pair_args[@]}" -g "$BACTERIA_GENE_ATTRIBUTE" -t CDS \
   -o "$OUTPUT_DIR/featurecounts_BACTERIA_summary.txt" "${BACTERIA_sam_filenames[@]}"
 sed 's/\t/,/g' "$OUTPUT_DIR/featurecounts_BACTERIA_summary.txt" > "$OUTPUT_DIR/featurecounts_BACTERIA_summary.csv"
 
@@ -274,7 +358,7 @@ sed 's/\t/,/g' "$OUTPUT_DIR/featurecounts_BACTERIA_summary.txt" > "$OUTPUT_DIR/f
 # its CDS features and keep the results alongside the host Bowtie2 outputs.
 if [[ -n "$HOST_GFF" ]]; then
   HOST_sam_filenames=("$HOST_ALIGNMENT_DIR"/HOST_*.sam)
-  featureCounts -T "$THREADS" -a "$HOST_GFF" -O -s 1 -g "$HOST_GENE_ATTRIBUTE" -t CDS \
+  featureCounts -T "$THREADS" -a "$HOST_GFF" -O -s 1 "${featurecounts_pair_args[@]}" -g "$HOST_GENE_ATTRIBUTE" -t CDS \
     -o "$HOST_ALIGNMENT_DIR/featurecounts_HOST_summary.txt" "${HOST_sam_filenames[@]}"
   sed 's/\t/,/g' "$HOST_ALIGNMENT_DIR/featurecounts_HOST_summary.txt" \
     > "$HOST_ALIGNMENT_DIR/featurecounts_HOST_summary.csv"

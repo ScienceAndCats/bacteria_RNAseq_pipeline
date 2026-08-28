@@ -3,6 +3,7 @@ import fnmatch
 
 ### Import os module to use operating system dependent functionality ###
 import os
+import re
 
 BOWTIE_BACTERIA_DIR = os.path.join("bowtie_alignments", "bacteria")
 
@@ -52,48 +53,27 @@ csvfile.write("Sample, Raw Reads, Reads Written, Overall Allignment, Percent Cov
 rawReadsList = []
 readsWrittenList = []
 for file in cutadaptFiles:
-    f = open(file, "r")
-    lineone = f.readline()
-    linetwo = f.readline()
-    linethree = f.readline()
-    linefour = f.readline()
-    linefive = f.readline()
-    linesix = f.readline()
-    lineseven = f.readline()
-    lineeight = f.readline()
-    strip = lineeight.strip()
-    space = strip.replace(' ', '')
-    words = space.replace('Totalreadsprocessed:', '')
-    rawReads = words.replace(',', '')
-    rawReadsList.append(rawReads)
-    linenine = f.readline()
-    lineten = f.readline()
-    lineeleven = f.readline()
-    string = lineeleven.strip()
-    spac = string.replace(' ', '')
-    word = spac.replace('Readswritten(passingfilters):', '')
-    readsWritten = word.replace(',','')
-    readsWrittenList.append(readsWritten)
-    f.close()
+    with open(file, "r") as f:
+        report = f.read()
+    raw_match = re.search(r"Total (?:read pairs|reads) processed:\s*([\d,]+)", report)
+    written_match = re.search(r"(?:Pairs|Reads) written \(passing filters\):\s*([\d,]+)", report)
+    if not raw_match or not written_match:
+        raise ValueError(f"Could not parse cutadapt report: {file}")
+    rawReadsList.append(raw_match.group(1).replace(',', ''))
+    readsWrittenList.append(written_match.group(1).replace(',', ''))
 
 ### Opens bowtie txt files and saves overall allignment and reads not mapped to decoy ###
 #notMappedtoDecoyList = []
 overallAlignmentList = []
 for file in bowtieFiles:
-    f = open(file, "r")
-    lineone = f.readline()
-    linetwo = f.readline()
-    linethree = f.readline()
-    #linefour = f.readline()
-    linefive = f.readline()
-    string = linefive.strip()
-    onetime = string.split(' ')
-    linesix = f.readline()
-    stringy = linesix.strip()
-    moreone = stringy.split(' ')
-    alligned = int(moreone[0]) + int(onetime[0])
-    overallaligned = str(alligned)
-    overallAlignmentList.append(overallaligned)
+    with open(file, "r") as f:
+        report = f.read()
+    aligned = re.findall(
+        r"^\s*(\d+) .*aligned (?:concordantly )?(?:exactly 1 time|>1 times)",
+        report,
+        re.MULTILINE,
+    )
+    overallAlignmentList.append(str(sum(map(int, aligned))))
 
 ### Opens coverageFiles and makes lists of percent coverage and mean coverage ###
 percentCoverageList = []
@@ -112,48 +92,27 @@ for file in coverageFilesList:
 rawReadsList = []
 readsWrittenList = []
 for file in cutadaptFiles:
-    f = open(file, "r")
-    lineone = f.readline()
-    linetwo = f.readline()
-    linethree = f.readline()
-    linefour = f.readline()
-    linefive = f.readline()
-    linesix = f.readline()
-    lineseven = f.readline()
-    lineeight = f.readline()
-    strip = lineeight.strip()
-    space = strip.replace(' ', '')
-    words = space.replace('Totalreadsprocessed:', '')
-    rawReads = words.replace(',', '')
-    rawReadsList.append(rawReads)
-    linenine = f.readline()
-    lineten = f.readline()
-    lineeleven = f.readline()
-    string = lineeleven.strip()
-    spac = string.replace(' ', '')
-    word = spac.replace('Readswritten(passingfilters):', '')
-    readsWritten = word.replace(',','')
-    readsWrittenList.append(readsWritten)
-    f.close()
+    with open(file, "r") as f:
+        report = f.read()
+    raw_match = re.search(r"Total (?:read pairs|reads) processed:\s*([\d,]+)", report)
+    written_match = re.search(r"(?:Pairs|Reads) written \(passing filters\):\s*([\d,]+)", report)
+    if not raw_match or not written_match:
+        raise ValueError(f"Could not parse cutadapt report: {file}")
+    rawReadsList.append(raw_match.group(1).replace(',', ''))
+    readsWrittenList.append(written_match.group(1).replace(',', ''))
 
 ### Opens bowtie txt files and saves overall allignment and reads not mapped to decoy ###
 #notMappedtoDecoyList = []
 overallAlignmentList = []
 for file in bowtieFiles:
-    f = open(file, "r")
-    lineone = f.readline()
-    linetwo = f.readline()
-    linethree = f.readline()
-    #linefour = f.readline()
-    linefive = f.readline()
-    string = linefive.strip()
-    onetime = string.split(' ')
-    linesix = f.readline()
-    stringy = linesix.strip()
-    moreone = stringy.split(' ')
-    alligned = int(moreone[0]) + int(onetime[0])
-    overallaligned = str(alligned)
-    overallAlignmentList.append(overallaligned)
+    with open(file, "r") as f:
+        report = f.read()
+    aligned = re.findall(
+        r"^\s*(\d+) .*aligned (?:concordantly )?(?:exactly 1 time|>1 times)",
+        report,
+        re.MULTILINE,
+    )
+    overallAlignmentList.append(str(sum(map(int, aligned))))
 
 ### Opens coverageFiles and makes lists of percent coverage and mean coverage ###
 percentCoverageList = []
