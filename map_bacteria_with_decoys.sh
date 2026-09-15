@@ -103,7 +103,8 @@ ALIGNMENT_DIR="$OUTPUT_DIR/bowtie_alignments"
 DECOY_ALIGNMENT_DIR="$ALIGNMENT_DIR/decoy"
 BACTERIA_ALIGNMENT_DIR="$ALIGNMENT_DIR/bacteria"
 HOST_ALIGNMENT_DIR="$ALIGNMENT_DIR/host"
-mkdir -p "$OUTPUT_DIR" "$DECOY_ALIGNMENT_DIR" "$BACTERIA_ALIGNMENT_DIR"
+LEFTOVER_ALIGNMENT_DIR="$ALIGNMENT_DIR/leftover"
+mkdir -p "$OUTPUT_DIR" "$DECOY_ALIGNMENT_DIR" "$BACTERIA_ALIGNMENT_DIR" "$LEFTOVER_ALIGNMENT_DIR"
 if [[ -n "$HOST_BOWTIE2_INDEX" ]]; then
   mkdir -p "$HOST_ALIGNMENT_DIR"
 fi
@@ -343,10 +344,29 @@ if [[ -n "$HOST_BOWTIE2_INDEX" ]]; then
   for idx in "${!HOST_trim_filenames[@]}"; do
     i="${HOST_trim_filenames[$idx]}"; i_basename="${sample_names[$idx]}_${MIN_READ_LENGTH}bp"
     echo "mapping to the host reference: $i_basename ..."
-    if [[ "$READ_LAYOUT" == "paired" ]]; then input_args=(-1 "$i" -2 "${HOST_trim_mates[$idx]}"); else input_args=(-U "$i"); fi
+    if [[ "$READ_LAYOUT" == "paired" ]]; then
+      input_args=(-1 "$i" -2 "${HOST_trim_mates[$idx]}")
+      leftover_args=(--un-conc-gz "$LEFTOVER_ALIGNMENT_DIR/${i_basename}_leftover_%.fastq.gz")
+    else
+      input_args=(-U "$i")
+      leftover_args=(--un-gz "$LEFTOVER_ALIGNMENT_DIR/${i_basename}_leftover.fastq.gz")
+    fi
     bowtie2 --end-to-end -p "$THREADS" -x "$HOST_BOWTIE2_INDEX" -q "${input_args[@]}" \
-      -S "$HOST_ALIGNMENT_DIR/HOST_${i_basename}.sam" \
+      -S "$HOST_ALIGNMENT_DIR/HOST_${i_basename}.sam" "${leftover_args[@]}" \
       2> "$HOST_ALIGNMENT_DIR/HOST_${i_basename}.bowtie_output.txt"
+  done
+else
+  # With no host alignment, the bacterial-unmapped reads are already the final
+  # leftovers. Keep a consistently named copy in the same output location used
+  # for host-unmapped reads.
+  for idx in "${!HOST_trim_filenames[@]}"; do
+    i_basename="${sample_names[$idx]}_${MIN_READ_LENGTH}bp"
+    if [[ "$READ_LAYOUT" == "paired" ]]; then
+      cp -- "${HOST_trim_filenames[$idx]}" "$LEFTOVER_ALIGNMENT_DIR/${i_basename}_leftover_1.fastq.gz"
+      cp -- "${HOST_trim_mates[$idx]}" "$LEFTOVER_ALIGNMENT_DIR/${i_basename}_leftover_2.fastq.gz"
+    else
+      cp -- "${HOST_trim_filenames[$idx]}" "$LEFTOVER_ALIGNMENT_DIR/${i_basename}_leftover.fastq.gz"
+    fi
   done
 fi
 

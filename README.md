@@ -98,6 +98,7 @@ bash map_bacteria_with_decoys.sh configs/project_a.env
 - `bowtie_alignments/bacteria/` — bacterial SAM/BAM files, Bowtie2 logs, and coverage reports.
 - `bowtie_alignments/bacteria/*_unmapped_to_bacteria.fastq.gz` — reads that mapped to neither the decoy nor bacterial reference and are used as the optional host-alignment input.
 - `bowtie_alignments/host/` — optional host SAM files, Bowtie2 logs, and host featureCounts results.
+- `bowtie_alignments/leftover/*_leftover.fastq.gz` (single) or `*_leftover_{1,2}.fastq.gz` (paired) — reads that passed trimming but failed to align to the decoy, bacterial, and configured host references. When host mapping is disabled, these contain reads that failed the decoy and bacterial alignments.
 - `featurecounts_BACTERIA_summary.txt` and `featurecounts_BACTERIA_summary.csv` — featureCounts results.
 - `bowtie_alignments/host/featurecounts_HOST_summary.txt` and `.csv` — optional, separate host featureCounts results.
 - `bowtie_alignments/bacteria/BACTERIA_*_coverage.txt` — samtools coverage reports.
