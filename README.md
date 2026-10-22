@@ -1,125 +1,117 @@
-# Whiteley Bacteria Mapping Pipeline
+# Bacterial RNA-seq pipeline
 
-This repository contains a single- and paired-end FASTQ processing pipeline for bacterial sequencing runs. The pipeline trims adapters, removes reads that map to a decoy/pangenome reference, maps the remaining reads to a configurable bacterial reference genome, counts gene-level alignments, calculates bacterial coverage metrics, and writes a project-level CSV summary.
+Trim single- or paired-end FASTQ reads, remove decoy alignments, align to bacterial and optional host RNA **before genomic DNA**, and report the disposition of every passing read or read pair.
 
-## What the program does
-
-`map_bacteria_with_decoys.sh` runs the analysis in these stages:
-
-1. Finds input FASTQ files matching the configured glob and, when sampling is enabled, randomly selects up to the configured number of reads from each file.
-2. Uses `cutadapt` to remove Illumina adapter sequence and discard reads shorter than the configured minimum length.
-3. Uses `bowtie2` to map trimmed reads to a decoy/pangenome index and keeps reads that do **not** map to the decoys.
-4. Uses `bowtie2` again to map decoy-unmapped reads to the bacterial reference index, retaining the reads that also fail this second alignment. When `HOST_BOWTIE2_INDEX` is set, only those reads that mapped to neither the decoy nor the bacterium are mapped to the host index.
-5. Uses `featureCounts` from Subread to assign aligned reads to CDS features in the bacterial GFF annotation sharing the reference basename and, when host mapping is enabled, independently counts host alignments against the matching host annotation.
-6. Uses `samtools` to create, sort, index, and calculate coverage from BAM files.
-7. Uses `gene_position_profile.py` on each sorted bacterial BAM to calculate strand-aware, normalized feature-position and aggregate metagene profiles.
-8. Runs `bacteria_with_decoys_csvConversion.py` to combine cutadapt, bowtie2, coverage, and featureCounts outputs into `BACTERIA_<project-directory>.csv`.
-9. Writes `BACTERIA_<project-directory>_read_breakdown.csv`, with one sample per row and read counts, percentages of total reads, and the source of every value.
-
-The summary conversion scripts use only the Python standard library. Positional profiling uses pysam and matplotlib.
-
-## Dependencies
-
-The pipeline environment pins these command-line tools:
-
-- Python 3.13.5
-- cutadapt 5.1
-- bowtie2 2.5.4
-- samtools 1.22.1
-- Subread / featureCounts 2.1.1
-- pysam
-- matplotlib
-
-A conda environment file is provided in `environment.yml`.
-
-## Create the conda environment
+## Install and run
 
 ```bash
 conda env create -f environment.yml
-conda activate whiteley-bacteria-pipeline
-```
-
-If you are running on an HPC system that requires module loading, load your site-specific conda or mamba module before creating or activating the environment.
-
-## Configure inputs and references
-
-Edit `config.env` before running the pipeline. The key settings are:
-
-| Setting | Purpose |
-| --- | --- |
-| `FASTQ_DIR` | Directory containing input FASTQ files. |
-| `FASTQ_GLOB` | Shell glob for FASTQ inputs, such as `*.fastq`. |
-| `READ_LAYOUT` | `single` (default) or `paired`; paired files may be named `<sample>_R1.fastq[.gz]` and `<sample>_R2.fastq[.gz]`, or include the same suffix after the read marker (for example, `_R1_001` and `_R2_001`). |
-| `OUTPUT_DIR` | Directory where output files should be written. |
-| `SAMPLE_READS` | Set to `true` to analyze a random subset of each input, or `false` to analyze every read. |
-| `SAMPLE_SIZE` | Maximum reads sampled from each FASTQ (default: `5000`). |
-| `SAMPLE_SEED` | Seed used to make random sampling reproducible. |
-| `DECOY_BOWTIE2_INDEX` | Bowtie2 index basename for the decoy/pangenome reference. |
-| `BACTERIA_BOWTIE2_INDEX` | Shared basename for the bacterial Bowtie2 index (or FASTA) and GFF annotation. |
-| `HOST_BOWTIE2_INDEX` | Optional shared basename for the host index (or FASTA) and GFF annotation; leave empty to disable host mapping and counting. |
-| `ADAPTER_SINGLE` | Adapter passed to cutadapt for single-end reads. |
-| `ADAPTER_R1`, `ADAPTER_R2` | Mate-specific paired-end adapters (both default to `CTGTCTCTTATACACATCT`). |
-| `MIN_READ_LENGTH` | Minimum read length retained by cutadapt. |
-| `THREADS` | Number of threads used by every multithreaded step (default: `16`). |
-| `GENE_POSITION_BINS` | Number of equal normalized 5'-to-3' bins (default: `100`). |
-| `METAGENE_MIN_FEATURE_READS` | Assigned reads/fragments required for a feature to contribute to aggregate profiles (default: `10`). |
-| `CSV_CONVERSION_SCRIPT` | Path to `bacteria_with_decoys_csvConversion.py`. |
-
-### Quick sampling mode
-
-Set `SAMPLE_READS="true"` in `config.env` for a quick exploratory run. Before trimming or mapping, the pipeline uses reservoir sampling to select up to `SAMPLE_SIZE` complete read records. For paired input it selects the same record positions from both mates and verifies that their record counts agree. Files with 5,000 reads or fewer are used in full with the default setting. The temporary sampled inputs are written under `OUTPUT_DIR/.bacteria_sampled_fastq`; original FASTQ files are never modified. Sampling is reproducible for the same input paths and `SAMPLE_SEED`. Set `SAMPLE_READS="false"` for a full analysis.
-
-### Paired-end input
-
-Set `READ_LAYOUT="paired"` and place matching mates in `FASTQ_DIR`, for example `sample_R1.fastq.gz` and `sample_R2.fastq.gz`, or `sample_R1_001.fastq.gz` and `sample_R2_001.fastq.gz`. Any suffix after `_R1` must be identical to the suffix after `_R2`. The pipeline fails early when either mate is missing. Cutadapt receives both inputs with `-a`/`-A` and `-o`/`-p`; each Bowtie2 stage receives the pair with `-1`/`-2` and preserves concordant unmapped pairs for the next stage. FeatureCounts counts fragments rather than individual mates in paired mode.
-
-The Bowtie2 index settings should be the index basename, not an individual `.bt2` file. For example, use `/refs/bacteria_reference` if the files are named `/refs/bacteria_reference.1.bt2`, `/refs/bacteria_reference.2.bt2`, and so on. For every configured decoy, bacterial, or host basename, the pipeline first reuses a complete `.bt2` or `.bt2l` index. If no complete index exists, it looks beside that basename for `.fa`, `.fasta`, or `.fna` (optionally gzip-compressed) and builds the index at the configured basename. The bacterial and host annotations are discovered from the same basename using `.gff*`, which supports names such as `bacteria_reference.gff` and `bacteria_reference.gff3`. Exactly one matching annotation must exist. For feature counting, the pipeline uses the annotation's `locus` attribute as the gene identifier, automatically falling back to `locus_tag` and then `gene` when the preferred attributes are unavailable. It exits with a clear error before trimming reads when required reference inputs or identifier attributes are missing or ambiguous.
-
-To enable host mapping and feature counting, set `HOST_BOWTIE2_INDEX` to the shared host reference basename (or place a matching FASTA beside that basename so the pipeline can build it) and provide a matching `.gff*` annotation. Setting it to `""` skips host index preparation, alignment, and counting. Host Bowtie2 input consists exclusively of reads that did not align to either the decoy or bacterial reference, and host count outputs remain separate from bacterial counts under `bowtie_alignments/host`.
-
-## Run the pipeline
-
-From this repository, run:
-
-```bash
+conda activate bacteria-RNAseq-pipeline
 bash map_bacteria_with_decoys.sh config.env
 ```
 
-You can keep multiple config files and pass the one for the current run:
+The environment specifies Python 3.13.15, cutadapt 5.2, Bowtie2 2.5.5, samtools 1.24, Subread / featureCounts 2.1.1, pysam, matplotlib, and Biopython. Biopython reads GenBank annotations, including joined and reverse-strand features.
+
+Copy `config.env` for each project and set the reference **folders**, rather than filename or index basenames:
 
 ```bash
-bash map_bacteria_with_decoys.sh configs/project_a.env
+FASTQ_DIR="/path/to/fastqs"
+FASTQ_GLOB="*.fastq.gz"
+OUTPUT_DIR="/path/to/results"
+READ_LAYOUT="paired"
+DECOY_REFERENCE_DIR="/path/to/referencegenomes/decoy"
+BACTERIA_REFERENCE_DIR="/path/to/referencegenomes/PAO1"
+HOST_REFERENCE_DIR="/path/to/referencegenomes/human"  # or mouse; empty disables host
+THREADS="4"
+COUNT_STRAND="forward"
 ```
 
-## Important outputs
+Run the copied config with `bash map_bacteria_with_decoys.sh /path/to/project.env`. Relative paths in a config are resolved from the directory where you launch the command. References are read only; index building requires space in the cache, not write access to the reference folders.
 
-- `*_22bp.trim.fastq` (single) or `*_R{1,2}_22bp.trim.fastq` (paired) — adapter-trimmed FASTQ files.
-- `bowtie_alignments/decoy/` — decoy SAM files, Bowtie2 logs, and decoy-unmapped reads.
-- `bowtie_alignments/bacteria/` — bacterial SAM/BAM files, Bowtie2 logs, and coverage reports.
-- `bowtie_alignments/bacteria/*_unmapped_to_bacteria.fastq.gz` — reads that mapped to neither the decoy nor bacterial reference and are used as the optional host-alignment input.
-- `bowtie_alignments/host/` — optional host SAM files, Bowtie2 logs, and host featureCounts results.
-- `bowtie_alignments/leftover/*_leftover.fastq.gz` (single) or `*_leftover_{1,2}.fastq.gz` (paired) — reads that passed trimming but failed to align to the decoy, bacterial, and configured host references. When host mapping is disabled, these contain reads that failed the decoy and bacterial alignments.
-- `featurecounts_BACTERIA_summary.txt` and `featurecounts_BACTERIA_summary.csv` — featureCounts results.
-- `bowtie_alignments/host/featurecounts_HOST_summary.txt` and `.csv` — optional, separate host featureCounts results.
-- `bowtie_alignments/bacteria/BACTERIA_*_coverage.txt` — samtools coverage reports.
-- `bowtie_alignments/bacteria/BACTERIA_*.feature_read_positions.csv` — unique per-read/per-fragment positions and explicitly flagged ambiguous overlaps.
-- `bowtie_alignments/bacteria/BACTERIA_*.feature_position_bins.csv` — read counts and within-feature fractions for every feature and normalized bin.
-- `bowtie_alignments/bacteria/BACTERIA_*.metagene_{CDS,non_CDS}_profile.csv` and `.png` — separate protein-coding and noncoding aggregate profiles.
-- `bowtie_alignments/bacteria/BACTERIA_*.metagene_non_CDS_by_type.csv` and `.png` — subtype profiles (for example rRNA, tRNA, ncRNA, tmRNA, and other).
-- `bowtie_alignments/bacteria/BACTERIA_*.metagene_CDS_vs_non_CDS.png` — comparison of mean normalized profiles.
-- `bowtie_alignments/bacteria/BACTERIA_*.feature_position_summary.csv` — examined, unique, ambiguous, outside-feature, contributing-feature, and non-CDS subtype counts.
-- `BACTERIA_<project-directory>.csv` — combined summary table.
-- `BACTERIA_<project-directory>_read_breakdown.csv` — per-sample read disposition. Each attribute has a raw count, a percentage of total input reads, and a source column. Bacterial and host non-rRNA values are the corresponding aligned counts minus reads assigned to an `rRNA` feature. Leftover reads passed cutadapt but aligned to none of the decoy, bacterial, or host references.
+## Reference folders
 
-## Notes
+Discovery searches recursively and accepts `.fa`, `.fasta`, and `.fna`, with optional `.gz` compression, plus `.gff`, `.gff3`, `.gbff`, `.gbk`, or `.gb` annotations. For example:
 
-- Input files must end in `.fastq` or `.fastq.gz`; use `FASTQ_GLOB` to narrow which files are selected.
-- Ensure the configured bacterial reference and annotation use compatible genome versions.
+```text
+referencegenomes/
+├── PAO1/
+│   ├── GCF_..._genomic.fna.gz
+│   ├── GCF_..._genomic.gff.gz
+│   ├── GCF_..._genomic.gbff.gz
+│   ├── GCF_..._rna_from_genomic.fna.gz
+│   └── GCF_..._cds_from_genomic.fna.gz
+├── decoy/
+│   ├── Gina_Pangenome.fasta
+│   └── Gina_Pangenome.{1,2,3,4,rev.1,rev.2}.bt2l
+└── human/
+    ├── human_DNA/
+    │   ├── GCF_..._genomic.fna.gz
+    │   └── GCF_..._genomic.gff.gz
+    └── human_RNA/
+        ├── human.1.rna.fna.gz
+        ├── human.1.rna.gbff.gz
+        ├── human.2.rna.fna.gz
+        └── human.2.rna.gbff.gz
+```
 
-## Normalized feature-position analysis
+- **Decoy:** reuse one complete Bowtie2 `.bt2` or `.bt2l` index when available. Otherwise build from the folder's FASTA references. `.mmi` files are ignored.
+- **Bacterial / host DNA:** select the genomic FASTA and its annotations. CDS-only FASTA files (`cds_from_genomic`) are excluded from genomic discovery. GFF is preferred; genomic GBFF can supply annotations instead. A sequence-bearing GBFF can also supply the genome when no FASTA counterpart exists. Ambiguous assemblies, missing annotations, duplicate sequence IDs, and incompatible annotation coordinates produce errors before reads are processed.
+- **Bacterial / host RNA:** combine the RNA FASTA shards into one index per organism. Matching RNA GBFF files supply sequence when FASTA is absent and provide transcript-coordinate CDS and RNA annotations; these distinguish coding transcript bases from UTRs and noncoding transcripts. For bacterial `rna_from_genomic` references, NCBI FASTA headers such as `[gbkey=rRNA] [locus_tag=...]` can supply noncoding RNA identities. An ambiguous or unannotated coding transcript needs its RNA GBFF rather than an invented CDS assignment.
+- If separate RNA FASTA is absent, annotated noncoding RNAs are extracted from the genomic reference. If neither exists, that organism's RNA stage is omitted and genomic alignment still runs.
 
-The post-alignment analysis collapses differently sized annotated features onto a common biological coordinate: **0% is the 5' end and 100% is the 3' end**. It follows genomic start-to-end on `+` features and reverses genomic coordinates on `-` features. Single-end observations use the midpoint of the aligned portion. In paired mode, the complete aligned fragment midpoint is used and the pair is counted once. Unmapped, secondary, and supplementary alignments are ignored; duplicates are not filtered.
+Generated FASTA, normalized GFF annotations, indices, and build logs go under `OUTPUT_DIR/.reference_cache`. Set `REFERENCE_CACHE_DIR` to a shared writable cache outside all input reference folders to reuse them across projects. Cache identities incorporate source paths, sizes, modification times, and the preparation format version; complete cached indices are reused. Keep one genome assembly per organism folder. Human genomic indexing requires substantial RAM, disk space, and time; the pipeline does not build a separate index for every RNA shard.
 
-Protein-coding loci (`CDS`) use the complete parent gene interval when the annotation hierarchy provides it (falling back to the combined CDS extent). Ordinary `gene` records are never treated as noncoding merely because they lack a CDS type. Non-CDS loci come from biologically informative RNA annotations such as rRNA, tRNA, tmRNA, ncRNA, sRNA, misc_RNA, and snRNA, with RNA children preferred over their generic gene parents. Subtype aggregates prevent abundant rRNA from silently dominating every noncoding comparison.
+## Alignment and counting
 
-Each feature is normalized independently: its bin fraction is `reads in bin / reads assigned to that feature`. Aggregate CSVs and plots report the mean and median of those per-feature fractions, rather than pooling raw reads. Features below `METAGENE_MIN_FEATURE_READS` remain visible in detailed and binned files but are excluded from aggregates. A midpoint overlapping multiple features in the same class is flagged in the detailed CSV, counted as ambiguous in the summary, and excluded from positional profiles rather than assigned arbitrarily. CDS and non-CDS assignment are evaluated separately, so biologically overlapping classes remain independently measurable.
+The stage order is:
+
+```text
+trim → decoy → bacterial RNA → host RNA → bacterial DNA → host DNA → leftover
+```
+
+Host stages are omitted when `HOST_REFERENCE_DIR=""`. At each step, only reads that failed the previous alignment continue. This gives RNA references priority across both organisms. When sequences are shared, the first successful stage owns the read; bacteria precede host within the same reference kind. Bowtie2 reports one primary alignment per read, including multimapping reads; there is no MAPQ exclusion threshold.
+
+Paired inputs must be named `<sample>_R1.fastq[.gz]` and `<sample>_R2.fastq[.gz]`, optionally with a matching suffix such as `_R1_001`. Mates remain together during trimming and sampling. Alignment uses `--no-mixed --no-discordant`: only concordant pairs are assigned, and the remaining complete pairs pass to the next stage. **One pair is one observation** in the CSVs. Single-end files contribute one observation per read.
+
+The mutually exclusive categories within each organism are:
+
+| Priority | Category | Assignment |
+| --- | --- | --- |
+| 1 | rRNA | Aligned bases overlap an annotated rRNA feature. |
+| 2 | CDS | Aligned bases overlap an annotated CDS. |
+| 3 | Other RNA | Aligned bases overlap another RNA, exon, or UTR annotation. RNA transcript sequence outside a CDS belongs here. |
+| 4 | Intergenic/unannotated | No eligible annotation overlaps the aligned bases on the selected strand. Includes introns outside annotated exons and regions without sufficient annotation. |
+
+For a pair, overlaps from both sequenced mates are considered together. Gaps in spliced alignments and unsequenced space between mates do not count as overlap. If multiple categories overlap, the priority above chooses exactly one; annotation ambiguity does not inflate totals. Generic genomic `gene` or whole-transcript spans do not label introns as RNA.
+
+`COUNT_STRAND="forward"` preserves the previous featureCounts `-s 1` behavior: read 1 must match the annotated strand. Use `reverse` for reverse-stranded libraries (`-s 2`) or `unstranded` (`-s 0`). Choose this for your library preparation; antisense alignments without eligible annotations are reported as intergenic/unannotated for the selected strand.
+
+Gene-level featureCounts tables remain available for CDS and rRNA in each RNA/DNA coordinate system when that annotation type exists. The exclusive category totals come from aligned-block classification, so they are not obtained by summing potentially overlapping gene counts.
+
+## Reports and other outputs
+
+- **`output_read_breakdown.csv`** is the main read-disposition report. `BACTERIA_<output-directory>_read_breakdown.csv` contains the same table for compatibility. Each metric includes a count, percentage of total input observations, and source. Bacteria and host each include aligned, CDS, rRNA, other RNA, intergenic/unannotated, and legacy non-rRNA columns. Non-rRNA is aligned minus rRNA; it includes the other three categories.
+- **`BACTERIA_<output-directory>.csv`** is the project summary. Bacterial alignment totals and CDS counts include both RNA and DNA stages. Coverage and mean depth describe only the bacterial genomic stage; RNA transcript coordinates cannot be merged directly with genomic coordinates. Because RNA-mapped reads do not undergo DNA alignment, this coverage describes the residual genomic alignments, not total RNA-seq coverage across genes.
+- `bowtie_alignments/decoy/` holds decoy SAM files, logs, and unmapped reads.
+- `bowtie_alignments/{bacteria,host}/rna/` holds RNA-stage SAM/BAM, category JSON, coverage, counts, and unmapped reads.
+- `bowtie_alignments/{bacteria,host}/` holds genomic-stage files. Bacterial genomic featureCounts tables retain their historical location at the output root.
+- `bowtie_alignments/leftover/` contains final unmapped `.fastq.gz` reads or mates.
+- `reference_manifest.json` records the discovered references and cache paths. `run_manifest.json` records the exact current-run sample/stage reports. Reporting checks stage-to-stage count conservation and category totals instead of globbing stale stage outputs.
+
+Bacterial RNA and DNA stages retain separate normalized feature-position analyses when suitable CDS or noncoding RNA features exist: `.feature_read_positions.csv`, `.feature_position_bins.csv`, `.feature_position_summary.csv`, `.metagene_*_profile.csv` and PNG plots. Coordinates run from biological 5′ (0%) to 3′ (100%), reversing negative-strand features. Single reads use alignment midpoints; paired profiles use fragment midpoints. Ambiguous overlaps within a feature class are explicitly flagged and excluded from metagene averages. These midpoint profiles are separate from the aligned-base overlap classification used by the disposition table.
+
+## Sampling and other settings
+
+`SAMPLE_READS="true"` selects up to `SAMPLE_SIZE` records (default `5000`) using reservoir sampling and `SAMPLE_SEED` (default `1`). Paired files use the same sampled record positions. Temporary samples live under `OUTPUT_DIR/.bacteria_sampled_fastq`; originals are unchanged. CSV totals refer to the selected input observations, not the unsampled source files. Set `false` for full analysis.
+
+Other settings include `ADAPTER_SINGLE`, `ADAPTER_R1`, `ADAPTER_R2`, `MIN_READ_LENGTH` (default `22`), `THREADS` (default `16`), `GENE_POSITION_BINS` (default `100`), and `METAGENE_MIN_FEATURE_READS` (default `10`). Aggregated metagene profiles average within-feature fractions over features meeting the minimum, rather than pooling raw reads.
+
+## Tests
+
+With the pipeline environment activated:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The suite covers reference discovery and normalization, category assignment, report conservation, and real single-/paired-end pipeline runs on synthetic references. Integration tests require the installed command-line tools and Python dependencies.

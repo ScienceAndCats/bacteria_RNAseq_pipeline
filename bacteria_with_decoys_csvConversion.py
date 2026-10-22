@@ -1,220 +1,109 @@
-### iImport fnmatch module to support Unix shell-style wildcards(these are symbols that take the place of an unknown character or characters(like the *)) ###
-import fnmatch
+#!/usr/bin/env python3
+"""Write the project summary, including bacterial RNA and genomic alignments."""
 
-### Import os module to use operating system dependent functionality ###
-import os
-import re
-
-BOWTIE_BACTERIA_DIR = os.path.join("bowtie_alignments", "bacteria")
-
-### Creates a list of featureCounts files to count ###
-featureCountsFiles = []
-for file in os.listdir("."):
-    if fnmatch.fnmatch(file, "featurecounts_BACTERIA_summary.txt"):
-        featureCountsFiles.append(file)
-
-### Creates list of cutadapt files to count ##
-cutadaptFiles = []
-for file in os.listdir("."):
-    if fnmatch.fnmatch(file, "*cutadapt_log.txt"):
-         cutadaptFiles.append(file)
-cutadaptFiles = sorted(cutadaptFiles, key=str.casefold)
-
-### Creates list of bowtie files to count ###
-bowtieFiles = []
-for file in os.listdir(BOWTIE_BACTERIA_DIR):
-    if fnmatch.fnmatch(file, "BACTERIA*.bowtie_output.txt"):
-        bowtieFiles.append(os.path.join(BOWTIE_BACTERIA_DIR, file))
-bowtieFiles= sorted(bowtieFiles, key=str.casefold)
-
-### Creates list of coverage files to count ###
-coverageFilesList = []
-for file in os.listdir(BOWTIE_BACTERIA_DIR):
-    if fnmatch.fnmatch(file, "BACTERIA*_coverage.txt"):
-        coverageFilesList.append(os.path.join(BOWTIE_BACTERIA_DIR, file))
-coverageFilesList= sorted(coverageFilesList, key=str.casefold)
-
-### Creates a list of filenames ###
-filenames = []
-for i in cutadaptFiles:
-    f = i.strip()
-    filenames.append(f.replace('_22bp.cutadapt_log.txt', ''))
-filenames = sorted(filenames, key=str.casefold)
-
-### Creates output csv template
+import argparse
 import csv
-full_path = os.getcwd().split("/")
-projectName = full_path[len(full_path)-1]
-summary_basename = "BACTERIA_" + projectName + ".csv"
-csvfile=open( summary_basename, 'w')
-csvfile.write("Sample, Raw Reads, Reads Written, Overall Allignment, Percent Covered, Mean Coverage, Reads Assigned to features, Features with non-zero reads\n")
+import json
+import re
+from pathlib import Path
 
-### Opens cutadapt txt files and saves number of raw reads and reads written ###
-rawReadsList = []
-readsWrittenList = []
-for file in cutadaptFiles:
-    with open(file, "r") as f:
-        report = f.read()
-    raw_match = re.search(r"Total (?:read pairs|reads) processed:\s*([\d,]+)", report)
-    written_match = re.search(r"(?:Pairs|Reads) written \(passing filters\):\s*([\d,]+)", report)
-    if not raw_match or not written_match:
-        raise ValueError(f"Could not parse cutadapt report: {file}")
-    rawReadsList.append(raw_match.group(1).replace(',', ''))
-    readsWrittenList.append(written_match.group(1).replace(',', ''))
-
-### Opens bowtie txt files and saves overall allignment and reads not mapped to decoy ###
-#notMappedtoDecoyList = []
-overallAlignmentList = []
-for file in bowtieFiles:
-    with open(file, "r") as f:
-        report = f.read()
-    aligned = re.findall(
-        r"^\s*(\d+) .*aligned (?:concordantly )?(?:exactly 1 time|>1 times)",
-        report,
-        re.MULTILINE,
-    )
-    overallAlignmentList.append(str(sum(map(int, aligned))))
-
-### Opens coverageFiles and makes lists of percent coverage and mean coverage ###
-percentCoverageList = []
-meanCoverageList = []
-for file in coverageFilesList:
-    f = open(file, "r")
-    lineone = f.readline()
-    linetwo = f.readline()
-    linethree = f.readline()
-    linefour = f.readline()
-    linefive = f.readline()
-    strip = linefive.replace(' ','')
-    split = strip.split(':')
-    percentCoverage = split[len(split)-1].replace('\n', '')
-### Opens cutadapt txt files and saves number of raw reads and reads written ###
-rawReadsList = []
-readsWrittenList = []
-for file in cutadaptFiles:
-    with open(file, "r") as f:
-        report = f.read()
-    raw_match = re.search(r"Total (?:read pairs|reads) processed:\s*([\d,]+)", report)
-    written_match = re.search(r"(?:Pairs|Reads) written \(passing filters\):\s*([\d,]+)", report)
-    if not raw_match or not written_match:
-        raise ValueError(f"Could not parse cutadapt report: {file}")
-    rawReadsList.append(raw_match.group(1).replace(',', ''))
-    readsWrittenList.append(written_match.group(1).replace(',', ''))
-
-### Opens bowtie txt files and saves overall allignment and reads not mapped to decoy ###
-#notMappedtoDecoyList = []
-overallAlignmentList = []
-for file in bowtieFiles:
-    with open(file, "r") as f:
-        report = f.read()
-    aligned = re.findall(
-        r"^\s*(\d+) .*aligned (?:concordantly )?(?:exactly 1 time|>1 times)",
-        report,
-        re.MULTILINE,
-    )
-    overallAlignmentList.append(str(sum(map(int, aligned))))
-
-### Opens coverageFiles and makes lists of percent coverage and mean coverage ###
-percentCoverageList = []
-meanCoverageList = []
-for file in coverageFilesList:
-    f = open(file, "r")
-    lineone = f.readline()
-    linetwo = f.readline()
-    linethree = f.readline()
-    linefour = f.readline()
-    linefive = f.readline()
-    strip = linefive.replace(' ','')
-    split = strip.split(':')
-    percentCoverage = split[len(split)-1].replace('\n', '')
-    percentCoverageList.append(percentCoverage)
-    linesix = f.readline()
-    stripe = linesix.replace(' ','')
-    splite = stripe.split(':')
-    meanCoverage = splite[len(splite)-1].replace('\n', '')
-    meanCoverageList.append(meanCoverage)
-
-### Coverage info is put into txt files ###
-percent= open("BACTERIA_percentCoverage.txt","w+")
-for i in percentCoverageList:
-    percent.write(i)
-    percent.write('\n')
-percent.close()
-
-mean= open("BACTERIA_meanCoverage.txt","w+")
-for i in meanCoverageList:
-    mean.write(i)
-    mean.write('\n')
-mean.close()
-
-### Puts data for mean coverage into a list ###
-meanCoverageList = []
-with open("BACTERIA_meanCoverage.txt", "r") as a_file:
-    for line in a_file:
-        meanCoverage = line.replace('\n', '')
-        meanCoverageList.append(meanCoverage)
-
-### Puts data for percent coverage into a list ###
-percentCoverageList = []
-with open("BACTERIA_percentCoverage.txt", "r") as a_file:
-    for line in a_file:
-        percentCoverage = line.replace('\n', '')
-        percentCoverageList.append(percentCoverage)
+from read_breakdown_csv import build_table, read_manifest, report_path
 
 
-### Opens featureCounts txt files and saves info to 'data' variable ###
-alignmentCountList = []
-geneCountList = []
-for file in featureCountsFiles:
-    f = open(file, "r")
-    topComment = f.readline()
-    header = f.readline()
-    data = f.readlines()
-    f.close()
+HEADER = (
+    "Sample", "Raw Reads", "Reads Written", "Overall Allignment", "Percent Covered",
+    "Mean Coverage", "Reads Assigned to features", "Features with non-zero reads",
+)
 
 
-    ### Reformats txt file data into list of strings ###
-    headerStrip = header.strip("\n")
-    headerList = headerStrip.split("\t")
-    sampleFiles = headerList[6:]
-
-    dataList = []
-    for line in data:
-        lineStrip = line.strip("\n")
-        lineList = line.split("\t")
-        dataList.append(lineList)
-
-    ### Creates dictionaries with samples as keys ###
-    alignmentCount = {}
-    geneCount = {}
-
-    for sample in sampleFiles:
-        alignmentCount[sample] = 0
-        geneCount[sample] = 0
-
-    ### Counts reads and genes ###
-    for data in dataList:
-
-     if len(data) >= 7:
-            for index,element in enumerate(data):
-                if index>=6:
-                    num_reads = int(element)
-                    sample_match = sampleFiles[index - 6]
-
-                    alignmentCount[sample_match] += num_reads
-                    if num_reads != 0:
-                        geneCount[sample_match] += 1
-
-    for sample in sampleFiles:
-        alignmentCountList.append(alignmentCount[sample])
-        geneCountList.append(geneCount[sample])
+def coverage_metrics(path):
+    """Return length-weighted genomic coverage from samtools coverage output."""
+    text = path.read_text()
+    if text.startswith("#rname\t"):
+        rows = list(csv.DictReader(text.splitlines(), delimiter="\t"))
+        lengths = [int(row["endpos"]) - int(row["startpos"]) + 1 for row in rows]
+        length = sum(lengths)
+        if not length:
+            return "0.00%", "0.0000"
+        covered = sum(int(row["covbases"]) for row in rows)
+        depth = sum(float(row["meandepth"]) * size for row, size in zip(rows, lengths))
+        return f"{covered * 100 / length:.2f}%", f"{depth / length:.4f}"
+    # Retain compatibility with the earlier human-readable samtools coverage -m report.
+    covered = re.search(r"Percent covered:\s*([\d.]+%)", text)
+    depth = re.search(r"Mean coverage:\s*([\d.]+)x", text)
+    if not covered or not depth:
+        raise ValueError(f"Could not parse samtools coverage report: {path}")
+    return covered.group(1), depth.group(1)
 
 
-### Adds data to csv file ###
-i = 0
-for file in cutadaptFiles:
-    csvfile.write ("{0},{1},{2},{3},{4},{5},{6},{7}\n".format(filenames[i], rawReadsList[i], readsWrittenList[i], overallAlignmentList[i], percentCoverageList[i], meanCoverageList[i], alignmentCountList[i], geneCountList[i]))
-    
-    i = i + 1
+def legacy_feature_counts(output_dir):
+    path = output_dir / "featurecounts_BACTERIA_summary.txt"
+    with path.open() as handle:
+        rows = list(csv.reader((line for line in handle if not line.startswith("#")), delimiter="\t"))
+    if not rows or len(rows[0]) < 7:
+        raise ValueError(f"Unexpected featureCounts format: {path}")
+    result = {}
+    for column, sam in enumerate(rows[0][6:], 6):
+        match = re.fullmatch(r"BACTERIA_(.+)_\d+bp\.sam", Path(sam).name)
+        if not match:
+            raise ValueError(f"Unexpected alignment name: {sam}")
+        values = [int(row[column]) for row in rows[1:]]
+        result[match.group(1)] = sum(values), sum(value > 0 for value in values)
+    return result
 
-csvfile.close()
+
+def summary_rows(output_dir):
+    table = build_table(output_dir)
+    manifest = {item["sample"]: item for item in read_manifest(output_dir)} if (output_dir / "run_manifest.json").exists() else None
+    legacy = legacy_feature_counts(output_dir) if manifest is None else None
+    rows = []
+    for sample, counts, _ in table:
+        coverage = ("", "")
+        if manifest is not None:
+            bacterial = [stage for stage in manifest[sample]["stages"] if stage["organism"] == "bacteria"]
+            genomic = [stage for stage in bacterial if stage["kind"] == "dna"]
+            if len(genomic) > 1:
+                raise ValueError(f"Multiple bacterial genomic coverage stages for {sample}")
+            if genomic and genomic[0].get("coverage"):
+                coverage = coverage_metrics(report_path(output_dir, genomic[0]["coverage"]))
+            cds_reads = counts["Bacteria CDS"]
+            features = set()
+            have_features = True
+            for stage in bacterial:
+                data = json.loads(report_path(output_dir, stage["categories"]).read_text())
+                identifiers = data.get("cds_features_with_reads")
+                if identifiers is None:
+                    have_features = False
+                elif not isinstance(identifiers, list) or not all(isinstance(value, str) for value in identifiers):
+                    raise ValueError(f"Invalid CDS feature identifiers for {sample}")
+                else:
+                    features.update(identifiers)
+            genes = len(features) if have_features else ""
+        else:
+            cds_reads, genes = legacy[sample]
+            logs = [path for path in output_dir.glob("*cutadapt_log.txt") if re.fullmatch(re.escape(sample) + r"_\d+bp\.cutadapt_log\.txt", path.name)]
+            if len(logs) != 1:
+                raise ValueError(f"Ambiguous cutadapt log for {sample}")
+            length = re.search(r"_(\d+)bp\.cutadapt_log", logs[0].name).group(1)
+            coverage = coverage_metrics(output_dir / f"bowtie_alignments/bacteria/BACTERIA_{sample}_{length}bp_coverage.txt")
+        rows.append((sample, counts["Total reads"], counts["Reads passing cutadapt length filter"],
+                     counts["Bacteria aligned"], *coverage, cds_reads, genes))
+    return rows
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-dir", type=Path, default=Path("."))
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    output_dir = args.output_dir.resolve()
+    rows = summary_rows(output_dir)
+    destination = args.output or output_dir / f"BACTERIA_{output_dir.name}.csv"
+    with destination.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(HEADER)
+        writer.writerows(rows)
+
+
+if __name__ == "__main__":
+    main()
