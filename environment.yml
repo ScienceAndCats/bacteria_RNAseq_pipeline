@@ -11,3 +11,4 @@ dependencies:
   - subread=2.1.1 # provides featureCounts
   - pysam
   - matplotlib
+  - biopython
