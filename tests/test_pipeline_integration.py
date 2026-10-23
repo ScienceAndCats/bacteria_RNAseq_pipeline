@@ -1,4 +1,5 @@
 """Real-tool integration checks; run with the pipeline environment on PATH."""
+from concurrent.futures import ThreadPoolExecutor
 import csv
 import gzip
 import json
@@ -8,6 +9,7 @@ import random
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -159,6 +161,160 @@ class PipelineIntegrationTests(unittest.TestCase):
         manifest = json.loads((output / "reference_manifest.json").read_text())
         self.assertEqual(manifest["decoy"]["index"], str(self.references / "decoy/Gina_Pangenome"))
         self.assertEqual(self.original_files, self.reference_snapshot(), "reference files must remain untouched")
+
+    def exercise_array_workers(self, layout):
+        # Execute the actual scheduler entry points locally; no Slurm service is
+        # required to exercise worker isolation and the dependent final report.
+        sys.path.insert(0, str(REPOSITORY))
+        from slurm_workflow import create_plan
+        directory = self.base / (f"array workers {layout}" + (" % parent" if layout == "paired" else ""))
+        reads = directory / "input reads"
+        reads.mkdir(parents=True)
+        names = ["alpha 'first" + (" %" if layout == "paired" else ""), "zeta"]
+        for name in names:
+            for mate in ((1, 2) if layout == "paired" else (1,)):
+                records = []
+                for ident, sequence, start in self.inputs:
+                    offset = start if mate == 1 else start + 160
+                    bases = sequence[offset:offset + 100]
+                    if mate == 2:
+                        bases = str(Seq(bases).reverse_complement())
+                    records.append(f"@{ident}\n{bases}\n+\n{'I' * 100}\n")
+                filename = f"{name}_R{mate}.fastq.gz" if layout == "paired" else f"{name}.fastq.gz"
+                gzwrite(reads / filename, "".join(records))
+        output = directory / "project output"
+        config = directory / "source config.env"
+        settings = {
+            "FASTQ_DIR": str(reads), "FASTQ_GLOB": "*.fastq.gz", "READ_LAYOUT": layout,
+            "OUTPUT_DIR": str(output), "DECOY_REFERENCE_DIR": str(self.references / "decoy"),
+            "BACTERIA_REFERENCE_DIR": str(self.references / "PAO1"),
+            "HOST_REFERENCE_DIR": str(self.references / "human"),
+            "REFERENCE_CACHE_DIR": str(self.cache), "THREADS": "2", "COUNT_STRAND": "forward",
+            "GENE_POSITION_BINS": "5", "METAGENE_MIN_FEATURE_READS": "1",
+            "SAMPLE_READS": "false", "CONDA_ENV": "",
+        }
+        config.write_text("".join(f"{k}={shlex.quote(v)}\n" for k, v in settings.items()))
+        plan_path, plan = create_plan(config, REPOSITORY, settings)
+        self.assertEqual(plan["array_concurrency"], 8)
+        self.assertEqual(plan["max_samples"], 40)
+        self.assertEqual([sample["sample"] for sample in plan["samples"]], names)
+        # Workers must use frozen settings even if the user's source file changes.
+        config.write_text("FASTQ_DIR=/missing/after/submission\nOUTPUT_DIR=/missing/after/submission\n")
+
+        def stage(mode, index=None, expect_success=True):
+            log_path = directory / f"{mode}_{index}.log"
+            env = dict(os.environ, MPLBACKEND="Agg", MPLCONFIGDIR=str(directory / f"matplotlib-{index}"), SLURM_CPUS_PER_TASK="2")
+            if index is not None:
+                env["SLURM_ARRAY_TASK_ID"] = str(index)
+            with log_path.open("w") as log:
+                result = subprocess.run([sys.executable, str(REPOSITORY / "slurm_workflow.py"), "execute", mode, str(plan_path)], cwd=REPOSITORY, stdout=log, stderr=subprocess.STDOUT, env=env)
+            if expect_success:
+                self.assertEqual(result.returncode, 0, log_path.read_text()[-12000:])
+            else:
+                self.assertNotEqual(result.returncode, 0)
+            return result
+
+        stage("prepare")
+        reference_manifest = Path(plan["reference_manifest"])
+        self.assertTrue(reference_manifest.is_file())
+        index_snapshot = {p: p.stat().st_mtime_ns for p in self.cache.rglob("*.bt2")}
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(lambda index: stage("sample", index), range(2)))
+        self.assertEqual(index_snapshot, {p: p.stat().st_mtime_ns for p in self.cache.rglob("*.bt2")})
+        self.assertFalse((output / "output_read_breakdown.csv").exists())
+        for index, sample in enumerate(plan["samples"]):
+            worker_output = Path(sample["output_dir"])
+            manifest = json.loads((worker_output / "run_manifest.json").read_text())
+            self.assertEqual(manifest["sample_index"], index)
+            self.assertEqual(manifest["input_sample_manifest"], plan["sample_manifest"])
+            self.assertEqual([entry["sample"] for entry in manifest["samples"]], [sample["sample"]])
+            self.assertFalse((worker_output / "output_read_breakdown.csv").exists())
+            self.assertFalse((worker_output / f"BACTERIA_{worker_output.name}.csv").exists())
+        stage("finalize")
+        with (output / "output_read_breakdown.csv").open() as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertEqual([row["Sample"] for row in rows], names)
+        for row in rows:
+            for label, count in (("Total reads", 12), ("Reads passing cutadapt length filter", 12), ("Decoy aligned", 1), ("Bacteria aligned", 5), ("Host aligned", 5), ("Leftover reads", 1), ("Bacteria CDS", 2), ("Bacteria rRNA", 1), ("Bacteria other RNA", 1), ("Bacteria intergenic/unannotated", 1)):
+                self.assert_count(row, label, count)
+        with (output / f"BACTERIA_{output.name}.csv").open() as handle:
+            self.assertEqual([row["Sample"] for row in csv.DictReader(handle)], names)
+        combined = json.loads((output / "run_manifest.json").read_text())
+        self.assertEqual([entry["sample"] for entry in combined["samples"]], names)
+        # Every stage's gene matrix keeps both sample columns, including the
+        # historical CSV companion and featureCounts assignment summary.
+        merged_files = []
+        for relative, organism in ((Path("."), "BACTERIA"), (Path("bowtie_alignments/bacteria/rna"), "BACTERIA"), (Path("bowtie_alignments/host"), "HOST"), (Path("bowtie_alignments/host/rna"), "HOST")):
+            for feature in ("summary", "rRNA"):
+                table = output / relative / f"featurecounts_{organism}_{feature}.txt"
+                with table.open() as handle:
+                    matrix = list(csv.reader((line for line in handle if not line.startswith("#")), delimiter="\t"))
+                self.assertEqual(len(matrix[0]), 8)
+                self.assertTrue(all(len(row) == 8 for row in matrix))
+                expected_sams = [f"{organism}_{sample}_22bp.sam" for sample in names]
+                self.assertEqual([Path(column).name for column in matrix[0][6:]], expected_sams)
+                counts = [sum(int(row[column]) for row in matrix[1:]) for column in (6, 7)]
+                expected = 1 if feature == "summary" or relative.name == "rna" else 0
+                self.assertEqual(counts, [expected, expected])
+                summary = Path(str(table) + ".summary")
+                with summary.open() as handle:
+                    assignment_rows = list(csv.reader(handle, delimiter="\t"))
+                self.assertEqual(assignment_rows[0], ["Status", *matrix[0][6:]])
+                self.assertTrue(all(len(row) == 3 for row in assignment_rows))
+                merged_files.extend([table, summary])
+                if feature == "summary":
+                    csv_table = table.with_suffix(".csv")
+                    with csv_table.open() as handle:
+                        csv_rows = list(csv.reader(line for line in handle if not line.startswith("#")))
+                    self.assertEqual(csv_rows, matrix)
+                    merged_files.append(csv_table)
+        # Missing or stale worker output must not replace successful reports
+        # or any previously published gene matrices/assignment summaries.
+        successful_outputs = {path: path.read_bytes() for path in merged_files + [output / "output_read_breakdown.csv"]}
+
+        def assert_outputs_preserved():
+            self.assertEqual({path: path.read_bytes() for path in successful_outputs}, successful_outputs)
+        worker_path = Path(plan["samples"][1]["output_dir"]) / "run_manifest.json"
+        saved = worker_path.read_bytes()
+        try:
+            worker_path.unlink()
+            stage("finalize", expect_success=False)
+            assert_outputs_preserved()
+            stale = json.loads(saved)
+            stale["sample_index"] = 0
+            worker_path.write_text(json.dumps(stale))
+            stage("finalize", expect_success=False)
+            assert_outputs_preserved()
+        finally:
+            worker_path.write_bytes(saved)
+        missing_table = Path(plan["samples"][1]["output_dir"]) / "featurecounts_BACTERIA_summary.txt"
+        original_table = missing_table.read_bytes()
+        try:
+            missing_table.unlink()
+            stage("finalize", expect_success=False)
+            assert_outputs_preserved()
+        finally:
+            missing_table.write_bytes(original_table)
+        # A required stage table absent from every worker is still a failure;
+        # it must not be mistaken for an optional annotation type.
+        required_tables = [Path(sample["output_dir"]) / "featurecounts_BACTERIA_summary.txt" for sample in plan["samples"]]
+        saved_tables = {path: path.read_bytes() for path in required_tables}
+        try:
+            for path in required_tables:
+                path.unlink()
+            stage("finalize", expect_success=False)
+            assert_outputs_preserved()
+        finally:
+            for path, contents in saved_tables.items():
+                path.write_bytes(contents)
+        stage("sample", index=2, expect_success=False)
+        self.assertEqual(self.original_files, self.reference_snapshot())
+
+    def test_two_single_end_array_workers_and_combined_reports(self):
+        self.exercise_array_workers("single")
+
+    def test_two_paired_end_array_workers_and_combined_reports(self):
+        self.exercise_array_workers("paired")
 
     def test_single_end_host_rna_priority_and_cache_reuse(self):
         output, row = self.run_pipeline("single host")
