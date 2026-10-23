@@ -28,6 +28,49 @@ COUNT_STRAND="forward"
 
 Run the copied config with `bash map_bacteria_with_decoys.sh /path/to/project.env`. Relative paths in a config are resolved from the directory where you launch the command. References are read only; index building requires space in the cache, not write access to the reference folders.
 
+## Run on Slurm: one sample per array task
+
+Keep `FASTQ_DIR`, `READ_LAYOUT`, references, and output settings in the same project config. You do not need to list individual FASTQs or calculate array indices. The defaults are:
+
+```bash
+MAX_SAMPLES="40"
+ARRAY_CONCURRENCY="8"
+THREADS="16"
+```
+
+One SE FASTQ is one sample; an R1/R2 pair is one sample. The discovered sample list is sorted and frozen before submission. `MAX_SAMPLES` is a submission limit, not a sampling limit: a folder containing more than 40 samples produces an error rather than dropping files. Increase it explicitly for a larger project. `ARRAY_CONCURRENCY` limits active sample tasks independently of the total sample count.
+
+`run_bacteria_pipeline.sbatch` follows the supplied cluster template: one node, one task, 16 CPUs, 64 GB, and a four-hour time limit. Fill in and uncomment the account and notification email placeholders if your cluster requires them; no account or username is supplied. Adjust memory, wall time, and partition in that template for your cluster. The submission helper sets CPUs per sample from `THREADS`, and the pipeline uses `SLURM_CPUS_PER_TASK` inside a job to stay within its allocation. The final reporting job requests one CPU and 4 GB.
+
+Activate the pipeline environment on the submission host. If compute nodes also need explicit activation, set these in your project config:
+
+```bash
+CONDA_SH="/path/to/your/miniforge3/etc/profile.d/conda.sh"
+CONDA_ENV="bacteria-RNAseq-pipeline"
+```
+
+Leave `CONDA_SH=""` to inherit an already activated environment. Paths may contain spaces. The pipeline checkout, FASTQs, references, cache, and output directory must be accessible from every compute node.
+
+Submit the entire workflow with **one command** from the directory where your config's relative paths should resolve:
+
+```bash
+bash submit_bacteria_pipeline.sh /path/to/project.env
+```
+
+Do not submit the array template directly; the helper determines the exact array range and automatically queues:
+
+1. **Preparation job:** build or reuse shared reference indices once.
+2. **Sample array:** `0-(sample_count-1)%8` by default, dependent on successful preparation. Each task uses `SLURM_ARRAY_TASK_ID` to select one SE file or PE pair from the frozen manifest. Its files, sampled reads, alignment outputs, and gene counts go to an isolated sample directory.
+3. **Final reporting job:** dependent on successful completion of the **entire** array. It verifies that every expected sample completed, merges the sample manifests and gene-count tables, and writes the project summary and read-breakdown CSVs using all samples. A failed or missing task prevents incomplete project reports from being published.
+
+Submission prints all three job IDs and the run-plan path. `bash submit_bacteria_pipeline.sh /path/to/project.env --dry-run` freezes the plan and prints the submission commands without queuing any jobs.
+
+Each submission creates `OUTPUT_DIR/slurm_runs/<run-id>/` containing the frozen configuration, `samples.json`, `plan.json`, `submission.json`, job logs, shared reference manifest, and `samples/0000_<sample>/` outputs. Configuration edits and later additions to the FASTQ folder do not change a queued run's sample list. Keep the selected FASTQs unchanged until that run completes. Reruns get a new directory so they do not mix with older sample outputs.
+
+The final combined `output_read_breakdown.csv`, `BACTERIA_<output-directory>_read_breakdown.csv`, `BACTERIA_<output-directory>.csv`, and merged featureCounts tables are published under the configured `OUTPUT_DIR`. Per-sample positional profiles stay in their sample directories. The final job consumes only the frozen run's successful sample manifests, so stale files from an earlier run are excluded. For a failed submission or task, inspect `submission.json` and the run's `logs/` directory; submit again after correcting the problem.
+
+The existing local command, `bash map_bacteria_with_decoys.sh project.env`, still processes the whole folder serially. The array worker flags (`--sample-manifest`, `--sample-index`, `--prepared-references`, and `--skip-reports`) are used automatically by the Slurm helper. `--prepare-only` prepares references without processing reads.
+
 ## Reference folders
 
 Discovery searches recursively and accepts `.fa`, `.fasta`, and `.fna`, with optional `.gz` compression, plus `.gff`, `.gff3`, `.gbff`, `.gbk`, or `.gb` annotations. For example:

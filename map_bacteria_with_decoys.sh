@@ -2,6 +2,25 @@
 set -euo pipefail
 
 CONFIG_FILE="${1:-config.env}"
+if (( $# )); then shift; fi
+SAMPLE_MANIFEST=""; SAMPLE_INDEX=""; PREPARED_REFERENCES=""
+PREPARE_ONLY=false; SKIP_REPORTS=false
+while (( $# )); do
+  case "$1" in
+    --sample-manifest|--sample-index|--prepared-references)
+      (( $# >= 2 )) || { echo "Missing value for $1" >&2; exit 1; }
+      case "$1" in
+        --sample-manifest) SAMPLE_MANIFEST="$2";;
+        --sample-index) SAMPLE_INDEX="$2";;
+        --prepared-references) PREPARED_REFERENCES="$2";;
+      esac
+      shift 2;;
+    --prepare-only) PREPARE_ONLY=true; shift;;
+    --skip-reports) SKIP_REPORTS=true; shift;;
+    *) echo "Unknown argument: $1" >&2; exit 1;;
+  esac
+done
+[[ -z "$SAMPLE_INDEX" || -n "$SAMPLE_MANIFEST" ]] || { echo '--sample-index requires --sample-manifest' >&2; exit 1; }
 [[ -f "$CONFIG_FILE" ]] || { echo "Config file not found: $CONFIG_FILE" >&2; exit 1; }
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
@@ -20,6 +39,8 @@ source "$CONFIG_FILE"
 : "${ADAPTER_R2:=CTGTCTCTTATACACATCT}"
 : "${MIN_READ_LENGTH:=22}"
 : "${THREADS:=16}"
+# Match the CPU allocation when running inside Slurm.
+THREADS="${SLURM_CPUS_PER_TASK:-$THREADS}"
 : "${GENE_POSITION_BINS:=100}"
 : "${METAGENE_MIN_FEATURE_READS:=10}"
 : "${COUNT_STRAND:=forward}"
@@ -33,11 +54,90 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ "$CSV_CONVERSION_SCRIPT" == /* ]] || CSV_CONVERSION_SCRIPT="$SCRIPT_DIR/$CSV_CONVERSION_SCRIPT"
 mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
+# Invalidate a previous successful array attempt before validating its inputs.
+if [[ "$PREPARE_ONLY" == false && -n "$SAMPLE_INDEX" ]]; then
+  rm -f -- "$OUTPUT_DIR/run_manifest.json"
+fi
 FASTQ_DIR="$(cd "$FASTQ_DIR" && pwd)"
 : "${REFERENCE_CACHE_DIR:=$OUTPUT_DIR/.reference_cache}"
+if [[ "$PREPARE_ONLY" == false ]]; then
+  if [[ -z "$SAMPLE_MANIFEST" ]]; then
+    SAMPLE_MANIFEST="$OUTPUT_DIR/input_samples.json"
+    python3 "$SCRIPT_DIR/sample_manifest.py" --fastq-dir "$FASTQ_DIR" --glob "$FASTQ_GLOB" --layout "$READ_LAYOUT" --output "$SAMPLE_MANIFEST"
+  fi
+  SAMPLE_MANIFEST=$(python3 - "$SAMPLE_MANIFEST" <<'PYPATH'
+from pathlib import Path
+import sys
+print(Path(sys.argv[1]).resolve())
+PYPATH
+)
+  selection_shell=$(python3 - "$SAMPLE_MANIFEST" "$SAMPLE_INDEX" "$READ_LAYOUT" "$SCRIPT_DIR" <<'PYSELECT'
+import json, re, shlex, sys
+from pathlib import Path
+path,index,layout,script_dir=sys.argv[1:]
+sys.path.insert(0,script_dir)
+from sample_manifest import validate_sample_name
+m=json.loads(Path(path).read_text())
+if m.get('read_layout') != layout:
+    raise SystemExit('ERROR: sample manifest layout does not match READ_LAYOUT')
+samples=m.get('samples')
+if not isinstance(samples,list) or not samples:
+    raise SystemExit('ERROR: sample manifest contains no samples')
+if index:
+    if not re.fullmatch(r'[0-9]+',index) or not 0<=int(index)<len(samples):
+        raise SystemExit(f'ERROR: sample index {index!r} is outside the manifest')
+    samples=[samples[int(index)]]
+names=set()
+for sample in samples:
+    name=sample.get('sample')
+    if not isinstance(name,str) or not name or name in names:
+        raise SystemExit('ERROR: invalid or duplicate sample name in manifest')
+    validate_sample_name(name)
+    names.add(name)
+    for key in ['read1']+(['read2'] if layout=='paired' else []):
+        value=sample.get(key)
+        if not value or not Path(value).is_absolute() or not Path(value).is_file():
+            raise SystemExit(f'ERROR: missing absolute {key} FASTQ path for {name}')
+for variable,values in [('sample_names',[s['sample'] for s in samples]),('read1_filenames',[s['read1'] for s in samples]),('read2_filenames',[s['read2'] for s in samples] if layout=='paired' else [])]:
+    print(variable+'=('+' '.join(shlex.quote(v) for v in values)+')')
+PYSELECT
+)
+  eval "$selection_shell"
+fi
+if [[ -n "$PREPARED_REFERENCES" ]]; then
+  # Prepared references are immutable shared input to array tasks. Copy the
+  # manifest into this task's output without rebuilding or writing shared files.
+  python3 - "$PREPARED_REFERENCES" "$OUTPUT_DIR/reference_manifest.json" "$SCRIPT_DIR" <<'PYREADY'
+import json, sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[3])
+from reference_folders import complete_index
+source,destination=map(Path,sys.argv[1:3])
+m=json.loads(source.read_text())
+for organism in ('decoy','bacteria','host'):
+    data=m.get(organism)
+    if organism!='host' and not data:
+        raise SystemExit(f'ERROR: prepared references lack {organism}')
+    if not data: continue
+    stages=[data] if organism=='decoy' else [data.get('dna'),data.get('rna')]
+    if organism!='decoy' and not data.get('dna'):
+        raise SystemExit(f'ERROR: prepared references lack {organism} DNA')
+    for stage in stages:
+        if stage is None: continue
+        if not complete_index(stage['index']) or (organism!='decoy' and not Path(stage['gff']).is_file()):
+            raise SystemExit('ERROR: prepared reference index or annotation is missing')
+if source.resolve()!=destination.resolve():
+    destination.write_text(json.dumps(m,indent=2)+'\n')
+PYREADY
+else
 reference_args=(--decoy-dir "$DECOY_REFERENCE_DIR" --bacteria-dir "$BACTERIA_REFERENCE_DIR" --cache-dir "$REFERENCE_CACHE_DIR" --threads "$THREADS" --output "$OUTPUT_DIR/reference_manifest.json")
 [[ -z "$HOST_REFERENCE_DIR" ]] || reference_args+=(--host-dir "$HOST_REFERENCE_DIR")
 python3 "$SCRIPT_DIR/reference_folders.py" "${reference_args[@]}"
+fi
+if [[ "$PREPARE_ONLY" == true ]]; then
+  echo "References prepared: $OUTPUT_DIR/reference_manifest.json"
+  exit 0
+fi
 # Values originate in the JSON manifest and are shell-quoted by shlex.quote.
 reference_shell=$(python3 - "$OUTPUT_DIR/reference_manifest.json" <<'PYREF'
 import json, shlex, sys
@@ -51,32 +151,6 @@ for name,values in [('stage_names',[s[0] for s in stages]),('stage_orgs',[s[1] f
 PYREF
 )
 eval "$reference_shell"
-shopt -s nullglob
-matched_fastqs=("$FASTQ_DIR"/$FASTQ_GLOB)
-if (( ${#matched_fastqs[@]} == 0 )); then
-  echo "No FASTQ files found in $FASTQ_DIR matching $FASTQ_GLOB" >&2
-  exit 1
-fi
-
-read1_filenames=()
-read2_filenames=()
-if [[ "$READ_LAYOUT" == "paired" ]]; then
-  for i in "${matched_fastqs[@]}"; do
-    if [[ "$i" =~ _R1(_[^/]*)?\.fastq(\.gz)?$ ]]; then
-      mate="${i%_R1*}_R2${i##*_R1}"
-      [[ -f "$mate" ]] || { echo "ERROR: Missing R2 mate for $i (expected $mate)" >&2; exit 1; }
-      read1_filenames+=("$i")
-      read2_filenames+=("$mate")
-    elif [[ "$i" =~ _R2(_[^/]*)?\.fastq(\.gz)?$ ]]; then
-      mate="${i%_R2*}_R1${i##*_R2}"
-      [[ -f "$mate" ]] || { echo "ERROR: Missing R1 mate for $i (expected $mate)" >&2; exit 1; }
-    fi
-  done
-  (( ${#read1_filenames[@]} > 0 )) || { echo "No paired FASTQs named *_R1[_suffix].fastq[.gz] and *_R2[_suffix].fastq[.gz] found" >&2; exit 1; }
-else
-  read1_filenames=("${matched_fastqs[@]}")
-fi
-
 # Randomly subsample complete FASTQ records with reservoir sampling. This keeps
 # memory use bounded by SAMPLE_SIZE even for very large input files.
 sample_fastq() {
@@ -169,11 +243,9 @@ case "${SAMPLE_READS,,}" in
 esac
 
 # Trim adapters while retaining paired mates together.
-trim_r1=(); trim_r2=(); sample_names=()
+trim_r1=(); trim_r2=()
 for idx in "${!read1_filenames[@]}"; do
-  filename=$(basename "${read1_filenames[$idx]}"); filename=${filename%.gz}; filename=${filename%.fastq}
-  sample="$filename"
-  if [[ "$READ_LAYOUT" == "paired" ]]; then sample="${filename%_R1*}${filename##*_R1}"; fi
+  sample="${sample_names[$idx]}"
   out1="$OUTPUT_DIR/${sample}_${MIN_READ_LENGTH}bp.trim.fastq"
   if [[ "$READ_LAYOUT" == "paired" ]]; then
     out1="$OUTPUT_DIR/${sample}_R1_${MIN_READ_LENGTH}bp.trim.fastq"
@@ -186,7 +258,7 @@ for idx in "${!read1_filenames[@]}"; do
     cutadapt -m "$MIN_READ_LENGTH" -j "$THREADS" -a "$ADAPTER_SINGLE" -o "$out1" "${read1_filenames[$idx]}" \
       > "$OUTPUT_DIR/${sample}_${MIN_READ_LENGTH}bp.cutadapt_log.txt"
   fi
-  trim_r1+=("$out1"); sample_names+=("$sample")
+  trim_r1+=("$out1")
 done
 
 # Only concordant pairs are assigned at a paired stage. This makes the
@@ -211,7 +283,10 @@ for idx in "${!trim_r1[@]}"; do
     fi
     echo "mapping $sample to ${stage_names[$stage]} ..."
     if [[ "$READ_LAYOUT" == paired ]]; then
-      unmapped="$prefix.unmapped_%.fastq"
+      # Keep Bowtie's percent placeholder out of user-supplied sample names.
+      unmapped="$directory/.unmapped_sample_${idx}_%.fastq"
+      unmapped1="$directory/.unmapped_sample_${idx}_1.fastq"
+      unmapped2="$directory/.unmapped_sample_${idx}_2.fastq"
       input_args=(-1 "$current1" -2 "$current2" --no-mixed --no-discordant)
       output_args=(--un-conc "$unmapped")
     else
@@ -223,7 +298,7 @@ for idx in "${!trim_r1[@]}"; do
     # Bowtie2's gzip wrapper does not quote paths containing spaces. Compress
     # its plain FASTQ outputs ourselves with safe argument boundaries instead.
     if [[ "$READ_LAYOUT" == paired ]]; then
-      gzip -f -- "${unmapped/\%/1}" "${unmapped/\%/2}"
+      gzip -f -- "$unmapped1" "$unmapped2"
     else
       gzip -f -- "$unmapped"
     fi
@@ -259,7 +334,7 @@ path,sample,cutadapt,name,organism,kind,log,categories,coverage=sys.argv[1:]
 with open(path,'a') as out:
     out.write(json.dumps({'sample':sample,'cutadapt_log':cutadapt,'stage':{'name':name,'organism':organism,'kind':kind,'log':log,'categories':categories or None,'coverage':coverage or None}})+'\n')
 PYEVENT
-    if [[ "$READ_LAYOUT" == paired ]]; then current1="${unmapped/\%/1}"; current2="${unmapped/\%/2}"; else current1="$unmapped"; fi
+    if [[ "$READ_LAYOUT" == paired ]]; then current1="$unmapped1.gz"; current2="$unmapped2.gz"; else current1="$unmapped"; fi
   done
   leftover_dir="$OUTPUT_DIR/bowtie_alignments/leftover"; mkdir -p "$leftover_dir"
   if [[ "$READ_LAYOUT" == paired ]]; then
@@ -295,10 +370,10 @@ for stage in "${!stage_names[@]}"; do
     fi
   done
 done
-python3 - "$events_file" "$OUTPUT_DIR" "$READ_LAYOUT" "${sample_names[@]}" <<'PYMANIFEST'
+python3 - "$events_file" "$OUTPUT_DIR" "$READ_LAYOUT" "$SAMPLE_MANIFEST" "$SAMPLE_INDEX" "${sample_names[@]}" <<'PYMANIFEST'
 import json, sys
 from pathlib import Path
-path,directory,layout,*names=sys.argv[1:]; out=Path(directory)
+path,directory,layout,input_manifest,sample_index,*names=sys.argv[1:]; out=Path(directory)
 samples={}
 for line in Path(path).read_text().splitlines():
     e=json.loads(line); sample=samples.setdefault(e['sample'],{'sample':e['sample'],'cutadapt_log':e['cutadapt_log'],'stages':[]})
@@ -307,11 +382,13 @@ for name,sample in samples.items():
     stem=Path(sample['cutadapt_log']).name.removesuffix('.cutadapt_log.txt')
     suffixes=['_1','_2'] if layout=='paired' else ['']
     sample['leftover']=[str(out/'bowtie_alignments/leftover'/f'{stem}_leftover{s}.fastq.gz') for s in suffixes]
-m={'read_layout':layout,'samples':[samples[n] for n in names]}
+m={'read_layout':layout,'input_sample_manifest':input_manifest,'sample_index':int(sample_index) if sample_index else None,'samples':[samples[n] for n in names]}
 tmp=out/'run_manifest.json.tmp'; tmp.write_text(json.dumps(m,indent=2)+'\n'); tmp.replace(out/'run_manifest.json')
 PYMANIFEST
+if [[ "$SKIP_REPORTS" != true ]]; then
 (
   cd "$OUTPUT_DIR"
   python3 "$CSV_CONVERSION_SCRIPT"
   python3 "$SCRIPT_DIR/read_breakdown_csv.py"
 )
+fi
