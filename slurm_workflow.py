@@ -23,6 +23,7 @@ REPOSITORY = Path(__file__).resolve().parent
 SETTINGS = (
     'FASTQ_DIR', 'FASTQ_GLOB', 'READ_LAYOUT', 'OUTPUT_DIR', 'MAX_SAMPLES',
     'ARRAY_CONCURRENCY', 'THREADS', 'REFERENCE_CACHE_DIR', 'CONDA_SH', 'CONDA_ENV',
+    'SLURM_ACCOUNT', 'SLURM_MAIL_USER',
     'DECOY_REFERENCE_DIR', 'BACTERIA_REFERENCE_DIR', 'HOST_REFERENCE_DIR',
     'ADAPTER_SINGLE', 'ADAPTER_R1', 'ADAPTER_R2', 'ADAPTER_SEQUENCE',
     'MIN_READ_LENGTH', 'SAMPLE_READS', 'SAMPLE_SIZE', 'SAMPLE_SEED',
@@ -32,6 +33,7 @@ SETTINGS = (
 DEFAULTS = {
     'FASTQ_DIR': '.', 'FASTQ_GLOB': '*.fastq*', 'READ_LAYOUT': 'single',
     'OUTPUT_DIR': '.', 'MAX_SAMPLES': '40', 'ARRAY_CONCURRENCY': '8',
+    'SLURM_ACCOUNT': '', 'SLURM_MAIL_USER': '',
     'THREADS': '16', 'REFERENCE_CACHE_DIR': '', 'CONDA_SH': '',
     'CONDA_ENV': 'bacteria-RNAseq-pipeline', 'HOST_REFERENCE_DIR': '',
     'CSV_CONVERSION_SCRIPT': 'bacteria_with_decoys_csvConversion.py',
@@ -117,6 +119,8 @@ def create_plan(config, base_dir, environment=None):
         'reference_manifest': str(run_dir / 'reference_manifest.json'),
         'read_layout': manifest['read_layout'], 'samples': samples,
         'threads': threads, 'array_concurrency': concurrency, 'max_samples': maximum,
+        'slurm_account': settings['SLURM_ACCOUNT'],
+        'slurm_mail_user': settings['SLURM_MAIL_USER'],
         'pipeline_script': str(REPOSITORY / 'map_bacteria_with_decoys.sh'),
         'workflow_script': str(REPOSITORY / 'slurm_workflow.py'),
         'sbatch_script': str(template), 'csv_script': settings['CSV_CONVERSION_SCRIPT'],
@@ -136,6 +140,12 @@ def load_plan(path):
 def scheduler_command(plan, path, mode, dependency=None):
     log_directory = str(Path(plan['run_dir']) / 'logs').replace('%', '%%')
     command = ['sbatch', '--parsable', f'--job-name=bacteria_{mode}', f'--chdir={plan["base_dir"]}', f'--output={log_directory}/%x_%A_%a.out']
+    if plan.get('slurm_account'):
+        command.append(f'--account={plan["slurm_account"]}')
+    if plan.get('slurm_mail_user'):
+        command += [f'--mail-user={plan["slurm_mail_user"]}', '--mail-type=BEGIN,END,FAIL']
+    else:
+        command.append('--mail-type=NONE')
     if mode == 'finalize':
         command += ['--cpus-per-task=1', '--mem=4G']
     else:

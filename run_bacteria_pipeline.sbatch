@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=bacteria_pipeline
-# Fill in and uncomment your cluster account if required:
-##SBATCH --account=YOUR_ACCOUNT
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=4:00:00
 #SBATCH --output=bacteria_pipeline-%A_%a.out
-#SBATCH --mail-type=BEGIN,END,FAIL
-# Fill in and uncomment your email if you want notifications:
-##SBATCH --mail-user=YOUR_EMAIL
+
+# Account and notification email come from config.env via sbatch command-line
+# options supplied by submit_bacteria_pipeline.sh. No personal edits are needed.
 
 # Submit with submit_bacteria_pipeline.sh, which derives the exact array size,
 # limits concurrency, and queues preparation and final reporting dependencies.

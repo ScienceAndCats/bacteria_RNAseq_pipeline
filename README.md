@@ -40,7 +40,16 @@ THREADS="16"
 
 One SE FASTQ is one sample; an R1/R2 pair is one sample. The discovered sample list is sorted and frozen before submission. `MAX_SAMPLES` is a submission limit, not a sampling limit: a folder containing more than 40 samples produces an error rather than dropping files. Increase it explicitly for a larger project. `ARRAY_CONCURRENCY` limits active sample tasks independently of the total sample count.
 
-`run_bacteria_pipeline.sbatch` follows the supplied cluster template: one node, one task, 16 CPUs, 64 GB, and a four-hour time limit. Fill in and uncomment the account and notification email placeholders if your cluster requires them; no account or username is supplied. Adjust memory, wall time, and partition in that template for your cluster. The submission helper sets CPUs per sample from `THREADS`, and the pipeline uses `SLURM_CPUS_PER_TASK` inside a job to stay within its allocation. The final reporting job requests one CPU and 4 GB.
+Set your cluster account and notification email in the project config; no edits to the Slurm scripts are needed:
+
+```bash
+SLURM_ACCOUNT="your_account"
+SLURM_MAIL_USER="you@example.org"
+```
+
+The submission helper passes these settings to **all three jobs**: reference preparation, the sample array, and final reporting. Leave `SLURM_ACCOUNT=""` to use your cluster's default account. Leave `SLURM_MAIL_USER=""` to disable notifications; otherwise Slurm sends BEGIN, END, and FAIL notifications to that address. Both settings are frozen with the run configuration at submission.
+
+`run_bacteria_pipeline.sbatch` follows the supplied cluster template: one node, one task, 16 CPUs, 64 GB, and a four-hour time limit. The submission helper sets CPUs per sample from `THREADS`, and the pipeline uses `SLURM_CPUS_PER_TASK` inside a job to stay within its allocation. The final reporting job requests one CPU and 4 GB.
 
 Activate the pipeline environment on the submission host. If compute nodes also need explicit activation, set these in your project config:
 

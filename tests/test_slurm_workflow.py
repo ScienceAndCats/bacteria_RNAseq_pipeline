@@ -67,7 +67,7 @@ class SlurmWorkflowTests(unittest.TestCase):
                 self.plan(**changes)
 
     def test_submit_dependencies_and_exact_array_size(self):
-        path, plan = self.plan()
+        path, plan = self.plan(SLURM_ACCOUNT='research_lab', SLURM_MAIL_USER='researcher@example.org')
         calls = []
         def fake(command, **kwargs):
             calls.append(command)
@@ -81,8 +81,33 @@ class SlurmWorkflowTests(unittest.TestCase):
         self.assertIn('--dependency=afterok:102', calls[2])
         self.assertIn('--kill-on-invalid-dep=yes', calls[1])
         self.assertIn('--kill-on-invalid-dep=yes', calls[2])
+        for command in calls:
+            self.assertIn('--account=research_lab', command)
+            self.assertIn('--mail-user=researcher@example.org', command)
+            self.assertIn('--mail-type=BEGIN,END,FAIL', command)
+        for config in (plan['frozen_config'], plan['prepare_config'], *(sample['config'] for sample in plan['samples'])):
+            frozen = Path(config).read_text()
+            self.assertIn('SLURM_ACCOUNT=research_lab\n', frozen)
+            self.assertIn('SLURM_MAIL_USER=researcher@example.org\n', frozen)
         self.assertEqual(calls[0][-1], plan['frozen_config'])
         self.assertEqual(json.loads((Path(plan['run_dir']) / 'submission.json').read_text())['status'], 'submitted')
+
+    def test_empty_account_and_email_use_defaults_without_notifications(self):
+        path, plan = self.plan()
+        for mode in ('prepare', 'sample', 'finalize'):
+            command = workflow.scheduler_command(plan, path, mode)
+            self.assertFalse(any(value.startswith('--account=') for value in command))
+            self.assertFalse(any(value.startswith('--mail-user=') for value in command))
+            self.assertIn('--mail-type=NONE', command)
+
+    def test_account_and_email_can_be_configured_independently(self):
+        for settings in ({'SLURM_ACCOUNT': 'research_lab'}, {'SLURM_MAIL_USER': 'researcher@example.org'}):
+            with self.subTest(settings=settings):
+                path, plan = self.plan(**settings)
+                command = workflow.scheduler_command(plan, path, 'sample')
+                self.assertEqual('--account=research_lab' in command, 'SLURM_ACCOUNT' in settings)
+                self.assertEqual('--mail-user=researcher@example.org' in command, 'SLURM_MAIL_USER' in settings)
+                self.assertEqual('--mail-type=BEGIN,END,FAIL' in command, 'SLURM_MAIL_USER' in settings)
 
     def test_partial_submission_failure_cancels_only_own_jobs(self):
         path, plan = self.plan()
@@ -125,13 +150,21 @@ class SlurmWorkflowTests(unittest.TestCase):
         self.assertIn('%%j/logs/%x_%A_%a.out', log)
 
     def test_submit_wrapper_dry_run_uses_config_folder_and_submits_nothing(self):
-        self.config.write_text("FASTQ_DIR='read files'\nOUTPUT_DIR='analysis results'\nDECOY_REFERENCE_DIR=decoy\nBACTERIA_REFERENCE_DIR=bacteria\nTHREADS=2\n")
+        self.config.write_text("FASTQ_DIR='read files'\nOUTPUT_DIR='analysis results'\nDECOY_REFERENCE_DIR=decoy\nBACTERIA_REFERENCE_DIR=bacteria\nTHREADS=2\nSLURM_ACCOUNT=research_lab\nSLURM_MAIL_USER=researcher@example.org\n")
         result = subprocess.run(['bash', str(workflow.REPOSITORY / 'submit_bacteria_pipeline.sh'), str(self.config), '--dry-run'], cwd=self.base, text=True, capture_output=True, check=True)
         self.assertIn('2 samples; array 0-1%8', result.stdout)
         plans = list(self.output.glob('slurm_runs/*/plan.json'))
         self.assertEqual(len(plans), 1)
         plan = json.loads(plans[0].read_text())
         self.assertEqual(plan['samples'][0]['read1'], str(self.reads / 'alpha.fastq'))
+        self.assertEqual(plan['slurm_account'], 'research_lab')
+        self.assertEqual(plan['slurm_mail_user'], 'researcher@example.org')
+        commands = [line for line in result.stdout.splitlines() if line.startswith('sbatch ')]
+        self.assertEqual(len(commands), 3)
+        for command in commands:
+            self.assertIn('--account=research_lab', command)
+            self.assertIn('--mail-user=researcher@example.org', command)
+            self.assertIn('--mail-type=BEGIN,END,FAIL', command)
         self.assertFalse((Path(plan['run_dir']) / 'submission.json').exists())
 
     def test_sbatch_activation_runs_before_python_is_needed(self):
