@@ -78,6 +78,22 @@ Each submission creates `OUTPUT_DIR/slurm_runs/<run-id>/` containing the frozen 
 
 The final combined `output_read_breakdown.csv`, `BACTERIA_<output-directory>_read_breakdown.csv`, `BACTERIA_<output-directory>.csv`, and merged featureCounts tables are published under the configured `OUTPUT_DIR`. Per-sample positional profiles stay in their sample directories. The final job consumes only the frozen run's successful sample manifests, so stale files from an earlier run are excluded. For a failed submission or task, inspect `submission.json` and the run's `logs/` directory; submit again after correcting the problem.
 
+### Large human annotations and CSV diagnostics
+
+Human featureCounts tables can contain very long semicolon-separated chromosome/coordinate annotations for one gene. CSV/TSV readers use a **64 Mi character field limit (67,108,864)**, matching the fix in `longread_bacteria_RNAseq_pipeline`, instead of Python's default 131,072-character limit. Annotation strings and counts are preserved without truncation; gene tables still merge one row per sample at a time.
+
+Every featureCounts merge writes **`large_csv_fields.txt`**. For each source record containing a cell larger than the old limit, it records the source sample/table path, logical record and physical line numbers, affected column names and character counts, and **all six annotation fields in full** (`Geneid`, `Chr`, `Start`, `End`, `Strand`, `Length`). Oversized non-annotation cells are also included in full. If the CSV parser still fails, including at the raised limit, the report includes the raw failing record and remaining table text so even a multiline annotation is not cut off. The report ends with counts and a COMPLETED or FAILED status. A clean merge explicitly reports zero oversized cells; each attempt refreshes its diagnostic report.
+
+For Slurm runs, the diagnostic is written directly to `OUTPUT_DIR/slurm_runs/<run-id>/large_csv_fields.txt`, so it survives finalization errors and cleanup of temporary reporting files. A successful final job also publishes a copy at `OUTPUT_DIR/large_csv_fields.txt`. After a failure, inspect the **run-specific** copy: the project-level copy and existing CSVs remain from the last successful finalization. Full annotation values are included once per affected source record, so the text file can be large.
+
+After updating the checkout, a run that failed only during final reporting can reuse all completed sample jobs. From a compute allocation with the pipeline environment activated, rerun just:
+
+```bash
+python slurm_workflow.py finalize /path/to/results/slurm_runs/<run-id>/plan.json
+```
+
+For a standalone merge, the diagnostic defaults to the merge's output directory; `merge_featurecounts.py --large-field-report /path/to/report.txt` chooses a different location.
+
 The existing local command, `bash map_bacteria_with_decoys.sh project.env`, still processes the whole folder serially. The array worker flags (`--sample-manifest`, `--sample-index`, `--prepared-references`, and `--skip-reports`) are used automatically by the Slurm helper. `--prepare-only` prepares references without processing reads.
 
 ## Reference folders

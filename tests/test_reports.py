@@ -8,8 +8,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from read_breakdown_csv import bowtie_counts, build_table, percentage
-from bacteria_with_decoys_csvConversion import summary_rows
+from read_breakdown_csv import assigned_by_sample, bowtie_counts, build_table, percentage
+from bacteria_with_decoys_csvConversion import coverage_metrics, legacy_feature_counts, summary_rows
+from csv_utils import LARGE_FIELD_THRESHOLD
 
 
 class ReportTests(unittest.TestCase):
@@ -53,6 +54,26 @@ class ReportTests(unittest.TestCase):
 
     def save_manifest(self, manifest):
         (self.output / 'run_manifest.json').write_text(json.dumps(manifest))
+
+    def test_large_fields_in_legacy_tables_coverage_and_assignment_summaries(self):
+        previous = csv.field_size_limit()
+        self.addCleanup(csv.field_size_limit, previous)
+        annotation = 'chr1;' * 30000
+        table = self.output / 'featurecounts_BACTERIA_summary.txt'
+        table.write_text('# featureCounts\nGeneid\tChr\tStart\tEnd\tStrand\tLength\tBACTERIA_sample_22bp.sam\n'
+                         f'gene1\t{annotation}\t1\t100\t+\t100\t7\n')
+        csv.field_size_limit(LARGE_FIELD_THRESHOLD)
+        self.assertEqual(legacy_feature_counts(self.output), {'sample': (7, 1)})
+        coverage = self.output / 'coverage.tsv'
+        coverage.write_text('#rname\tstartpos\tendpos\tnumreads\tcovbases\tcoverage\tmeandepth\tmeanbaseq\tmeanmapq\n'
+                            f'{annotation}\t1\t100\t7\t50\t50\t2\t40\t42\n')
+        csv.field_size_limit(LARGE_FIELD_THRESHOLD)
+        self.assertEqual(coverage_metrics(coverage), ('50.00%', '2.0000'))
+        sample = 'sample_' + 'x' * 140000
+        assignment = self.output / 'assignments.summary'
+        assignment.write_text(f'Status\tBACTERIA_{sample}_22bp.sam\nAssigned\t7\n')
+        csv.field_size_limit(LARGE_FIELD_THRESHOLD)
+        self.assertEqual(assigned_by_sample(assignment, 'BACTERIA'), {sample: 7})
 
     def test_bowtie_empty_input_terse_report(self):
         path = self.output / 'empty.log'

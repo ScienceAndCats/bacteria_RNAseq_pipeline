@@ -270,10 +270,48 @@ class PipelineIntegrationTests(unittest.TestCase):
                     merged_files.append(csv_table)
         # Missing or stale worker output must not replace successful reports
         # or any previously published gene matrices/assignment summaries.
-        successful_outputs = {path: path.read_bytes() for path in merged_files + [output / "output_read_breakdown.csv"]}
+        # Reproduce the reported human-host finalizer crash in a fresh process:
+        # a featureCounts annotation cell exceeds the old 128 KiB CSV cap.
+        from csv_utils import LARGE_FIELD_REPORT, configure_csv_field_size_limit
+        configure_csv_field_size_limit()
+        long_annotation = "host;" * 30000 + "FINAL_HOST_ANNOTATION"
+        host_tables = [Path(sample["output_dir"]) / "bowtie_alignments/host/featurecounts_HOST_summary.txt"
+                       for sample in plan["samples"]]
+
+        def replace_host_annotation(path, value):
+            with path.open(newline="") as handle:
+                rows = list(csv.reader((line for line in handle if not line.startswith("#")), delimiter="\t"))
+            rows[1][1] = value
+            with path.open("w", newline="") as handle:
+                handle.write("# synthetic long human annotation regression\n")
+                csv.writer(handle, delimiter="\t", lineterminator="\n").writerows(rows)
+
+        for path in host_tables:
+            replace_host_annotation(path, long_annotation)
+        stage("finalize")
+        diagnostic = output / LARGE_FIELD_REPORT
+        run_diagnostic = Path(plan["run_dir"]) / LARGE_FIELD_REPORT
+        self.assertEqual(diagnostic.read_bytes(), run_diagnostic.read_bytes())
+        for text in (long_annotation, "Oversized column: Chr", "Status: COMPLETED", "Oversized cells: 2"):
+            self.assertIn(text, diagnostic.read_text())
+        self.assertIn(long_annotation, (output / "bowtie_alignments/host/featurecounts_HOST_summary.csv").read_text())
+        self.assertIn(LARGE_FIELD_REPORT, json.loads((output / ".slurm_published_files.json").read_text())["files"])
+        successful_outputs = {path: path.read_bytes() for path in merged_files + [output / "output_read_breakdown.csv", diagnostic]}
 
         def assert_outputs_preserved():
             self.assertEqual({path: path.read_bytes() for path in successful_outputs}, successful_outputs)
+
+        # A later merge error retains full run-level diagnostics outside the
+        # disposable staging directory, while preserving published results.
+        saved_host = host_tables[1].read_bytes()
+        try:
+            replace_host_annotation(host_tables[1], long_annotation + "_MISMATCH")
+            stage("finalize", expect_success=False)
+            assert_outputs_preserved()
+            self.assertIn("Status: FAILED", run_diagnostic.read_text())
+            self.assertIn(long_annotation + "_MISMATCH", run_diagnostic.read_text())
+        finally:
+            host_tables[1].write_bytes(saved_host)
         worker_path = Path(plan["samples"][1]["output_dir"]) / "run_manifest.json"
         saved = worker_path.read_bytes()
         try:

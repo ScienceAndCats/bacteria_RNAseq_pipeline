@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import tempfile
 
+from csv_utils import LARGE_FIELD_REPORT, LargeFieldReport, featurecounts_rows
 
 ANNOTATION_COLUMNS = ("Geneid", "Chr", "Start", "End", "Strand", "Length")
 STAGES = (
@@ -31,8 +32,8 @@ TABLE_PATHS = tuple(
 MERGE_COMMENT = "# Merged featureCounts tables; sample columns follow input directory order.\n"
 
 
-def _rows(handle):
-    return csv.reader((line for line in handle if not line.startswith("#") and line.strip()), delimiter="\t")
+def _rows(handle, report=None):
+    return featurecounts_rows(handle, report)
 
 
 def _count(value, path, row_number):
@@ -41,10 +42,10 @@ def _count(value, path, row_number):
     return value
 
 
-def _merge_matrix(sources, destination):
+def _merge_matrix(sources, destination, report=None):
     """Stream corresponding rows from one open file per sample."""
     with ExitStack() as stack:
-        readers = [_rows(stack.enter_context(path.open(newline=""))) for path in sources]
+        readers = [_rows(stack.enter_context(path.open(newline="")), report) for path in sources]
         headers = [next(reader, None) for reader in readers]
         for path, header in zip(sources, headers):
             if header is None or len(header) != 7 or tuple(header[:6]) != ANNOTATION_COLUMNS or not header[6]:
@@ -79,9 +80,9 @@ def _merge_matrix(sources, destination):
     return sample_columns
 
 
-def _merge_summary(sources, destination, expected_columns):
+def _merge_summary(sources, destination, expected_columns, report=None):
     with ExitStack() as stack:
-        readers = [_rows(stack.enter_context(path.open(newline=""))) for path in sources]
+        readers = [_rows(stack.enter_context(path.open(newline="")), report) for path in sources]
         for path, reader, sample in zip(sources, readers, expected_columns):
             header = next(reader, None)
             if header != ["Status", sample]:
@@ -121,12 +122,14 @@ def _write_csv(source, destination):
         writer.writerows(_rows(handle))
 
 
-def merge_featurecounts(sample_directories, destination):
+def merge_featurecounts(sample_directories, destination, *, report_path=None):
     """Return generated files after merging all available stage/type matrices.
 
     Stage/type tables and their optional .summary files must each be present for
     every sample or absent for every sample. Sources are never modified. CDS
     matrices also receive the historical .csv companion; rRNA tables retain TSV.
+    A text diagnostic is written to report_path (default destination/large_csv_fields.txt)
+    independently of the returned table paths, and is retained on merge failures.
     """
     directories = [Path(directory).resolve() for directory in sample_directories]
     destination = Path(destination).resolve()
@@ -154,19 +157,27 @@ def merge_featurecounts(sample_directories, destination):
         if all(present):
             plans.append((relative, sources, summary_sources if all(summary_present) else None))
 
+    diagnostic = Path(report_path).resolve() if report_path is not None else destination / LARGE_FIELD_REPORT
+    protected = {path.resolve() for _, sources, summaries in plans for path in sources + (summaries or [])}
+    protected.update((destination / relative).resolve() for relative in TABLE_PATHS)
+    protected.update(Path(str(destination / relative) + '.summary').resolve() for relative in TABLE_PATHS)
+    protected.update((destination / relative).with_suffix('.csv').resolve() for relative in TABLE_PATHS)
+    if diagnostic in protected:
+        raise ValueError("Large-field report must not overwrite a featureCounts table")
     generated = []
-    for relative, sources, summary_sources in plans:
-        target = destination / relative
-        columns = _merge_matrix(sources, target)
-        generated.append(target)
-        if summary_sources:
-            summary_target = Path(str(target) + ".summary")
-            _merge_summary(summary_sources, summary_target, columns)
-            generated.append(summary_target)
-        if relative.name.endswith("_summary.txt"):
-            csv_target = target.with_suffix(".csv")
-            _write_csv(target, csv_target)
-            generated.append(csv_target)
+    with LargeFieldReport(diagnostic) as report:
+        for relative, sources, summary_sources in plans:
+            target = destination / relative
+            columns = _merge_matrix(sources, target, report)
+            generated.append(target)
+            if summary_sources:
+                summary_target = Path(str(target) + ".summary")
+                _merge_summary(summary_sources, summary_target, columns, report)
+                generated.append(summary_target)
+            if relative.name.endswith("_summary.txt"):
+                csv_target = target.with_suffix(".csv")
+                _write_csv(target, csv_target)
+                generated.append(csv_target)
     return generated
 
 
@@ -174,9 +185,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sample-dir", action="append", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--large-field-report", type=Path,
+                        help="Diagnostic text path; defaults to OUTPUT_DIR/large_csv_fields.txt")
     args = parser.parse_args()
     try:
-        merge_featurecounts(args.sample_dir, args.output_dir)
+        merge_featurecounts(args.sample_dir, args.output_dir, report_path=args.large_field_report)
     except (ValueError, OSError) as exc:
         parser.exit(1, f"ERROR: {exc}\n")
 

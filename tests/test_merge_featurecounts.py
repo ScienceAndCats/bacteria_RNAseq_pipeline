@@ -4,10 +4,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from merge_featurecounts import ANNOTATION_COLUMNS, TABLE_PATHS, merge_featurecounts
+from csv_utils import CSV_FIELD_SIZE_LIMIT, LARGE_FIELD_REPORT, LARGE_FIELD_THRESHOLD
 
 
 class MergeFeatureCountsTests(unittest.TestCase):
@@ -92,7 +94,92 @@ class MergeFeatureCountsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Mismatched featureCounts annotation'):
             merge_featurecounts(self.samples, self.output)
         self.assertEqual(target.read_text(), 'existing output\n')
-        self.assertEqual(sorted(path.name for path in self.output.iterdir()), [target.name])
+        self.assertEqual(sorted(path.name for path in self.output.iterdir()), sorted([target.name, LARGE_FIELD_REPORT]))
+        self.assertIn('Status: FAILED', (self.output / LARGE_FIELD_REPORT).read_text())
+
+    def test_large_human_annotations_merge_without_truncation_and_are_reported(self):
+        long_chr = 'chr1;' * 30000 + 'LAST_CHROMOSOME'
+        long_start = '101;' * 40000 + 'LAST_COORDINATE'
+        annotations = [('human_large_gene', long_chr, long_start, '200', '+', '100')]
+        originals = {}
+        relative = Path('bowtie_alignments/host/featurecounts_HOST_summary.txt')
+        for index, directory in enumerate(self.samples):
+            path = self.table(directory, relative, annotations=annotations, counts=(index + 3,))
+            originals[path] = path.read_bytes()
+        previous = csv.field_size_limit(LARGE_FIELD_THRESHOLD)
+        self.addCleanup(csv.field_size_limit, previous)
+        with self.assertRaises(csv.Error):
+            self.read_rows(path)
+        merge_featurecounts(self.samples, self.output)
+        rows = self.read_rows(self.output / relative)
+        self.assertEqual(rows[1], [*annotations[0], '3', '4'])
+        self.assertEqual(self.read_rows((self.output / relative).with_suffix('.csv'), ','), rows)
+        self.assertEqual(csv.field_size_limit(), 64 * 1024 * 1024)
+        report = (self.output / LARGE_FIELD_REPORT).read_text()
+        for path, content in originals.items():
+            self.assertIn(str(path), report)
+            self.assertEqual(path.read_bytes(), content)
+        for text in ('human_large_gene', long_chr, long_start, 'Oversized column: Chr (2)',
+                     'Oversized column: Start (3)', 'Oversized cells: 4',
+                     'Source records with oversized cells: 2', 'Status: COMPLETED'):
+            self.assertIn(text, report)
+
+    def test_parser_failure_keeps_complete_raw_record_in_explicit_report(self):
+        value = 'chr1;' * 30000 + 'END_OF_PROBLEM_CELL'
+        for directory in self.samples:
+            self.table(directory, annotations=[('problem_gene', value, '1', '10', '+', '10')], counts=(2,))
+        report = self.base / 'durable' / LARGE_FIELD_REPORT
+        # Exercise the hard-cap error path without allocating a 64+ MiB fixture.
+        with patch('csv_utils.CSV_FIELD_SIZE_LIMIT', LARGE_FIELD_THRESHOLD + 1):
+            with self.assertRaisesRegex(ValueError, 'full raw record saved'):
+                merge_featurecounts(self.samples, self.output, report_path=report)
+        text = report.read_text()
+        for expected in ('Status: FAILED', 'CSV parser errors: 1', 'problem_gene', value,
+                         'Table record: 2', 'Physical lines: 3-3', 'BEGIN RAW RECORD'):
+            self.assertIn(expected, text)
+        self.assertFalse((self.output / TABLE_PATHS[0]).exists())
+
+    def test_quoted_multiline_annotation_retains_comments_and_blank_lines(self):
+        annotation = 'chr1;' * 30000 + '\n# annotation content, not a comment\n\nlast annotation line'
+        for directory in self.samples:
+            self.table(directory, annotations=[('multi_gene', annotation, '1', '10', '+', '10')], counts=(2,))
+        merge_featurecounts(self.samples, self.output)
+        with (self.output / TABLE_PATHS[0]).open(newline='') as handle:
+            next(handle)  # merge comment
+            rows = list(csv.reader(handle, delimiter='\t'))
+        self.assertEqual(rows[1][1], annotation)
+        self.assertIn(annotation, (self.output / LARGE_FIELD_REPORT).read_text())
+
+    def test_parser_failure_does_not_cut_off_a_multiline_annotation(self):
+        annotation = 'chr1;' * 30000 + '\nUNREAD_MULTILINE_END'
+        for directory in self.samples:
+            self.table(directory, annotations=[('multiline_gene', annotation, '1', '10', '+', '10')], counts=(2,))
+        with patch('csv_utils.CSV_FIELD_SIZE_LIMIT', LARGE_FIELD_THRESHOLD + 1):
+            with self.assertRaisesRegex(ValueError, 'full raw record saved'):
+                merge_featurecounts(self.samples, self.output)
+        report = (self.output / LARGE_FIELD_REPORT).read_text()
+        self.assertIn(annotation, report)
+        self.assertIn('UNREAD_MULTILINE_END', report)
+        self.assertIn('Status: FAILED', report)
+
+    def test_no_large_cells_report_is_refreshed_on_rerun(self):
+        for directory in self.samples:
+            self.table(directory)
+        self.output.mkdir()
+        report = self.output / LARGE_FIELD_REPORT
+        report.write_text('stale oversized field report\n')
+        merge_featurecounts(self.samples, self.output)
+        self.assertIn('Oversized cells: 0', report.read_text())
+        self.assertNotIn('stale oversized field', report.read_text())
+
+    def test_report_cannot_overwrite_a_source_table(self):
+        for directory in self.samples:
+            self.table(directory)
+        source = self.samples[0] / TABLE_PATHS[0]
+        original = source.read_bytes()
+        with self.assertRaisesRegex(ValueError, 'must not overwrite'):
+            merge_featurecounts(self.samples, self.output, report_path=source)
+        self.assertEqual(source.read_bytes(), original)
 
     def test_gene_row_count_mismatch_is_rejected(self):
         self.table(self.samples[0])
