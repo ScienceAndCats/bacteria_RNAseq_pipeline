@@ -18,6 +18,7 @@ import uuid
 
 from sample_manifest import build_manifest
 from merge_featurecounts import merge_featurecounts
+from csv_utils import LARGE_FIELD_REPORT
 
 REPOSITORY = Path(__file__).resolve().parent
 SETTINGS = (
@@ -289,8 +290,12 @@ def finalize(plan):
             subprocess.run([sys.executable, str(REPOSITORY / 'read_breakdown_csv.py'), '--output-dir', str(staging), '--output', str(staging / 'output_read_breakdown.csv')], check=True)
             shutil.copyfile(staging / 'output_read_breakdown.csv', staging / alias_name)
             shutil.copyfile(plan['reference_manifest'], staging / 'reference_manifest.json')
-            gene_tables = merge_featurecounts([Path(sample['output_dir']) for sample in plan['samples']], staging)
-            names = [summary_name, 'output_read_breakdown.csv', alias_name, 'reference_manifest.json']
+            # Keep diagnostics outside disposable staging, including on failure.
+            diagnostic = Path(plan['run_dir']) / LARGE_FIELD_REPORT
+            gene_tables = merge_featurecounts([Path(sample['output_dir']) for sample in plan['samples']], staging,
+                                             report_path=diagnostic)
+            shutil.copyfile(diagnostic, staging / LARGE_FIELD_REPORT)
+            names = [summary_name, 'output_read_breakdown.csv', alias_name, 'reference_manifest.json', LARGE_FIELD_REPORT]
             names += [str(path.relative_to(staging)) for path in gene_tables]
             names.append('run_manifest.json')
             published = output / '.slurm_published_files.json'

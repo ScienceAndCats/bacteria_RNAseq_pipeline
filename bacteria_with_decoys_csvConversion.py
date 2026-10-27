@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 
 from read_breakdown_csv import build_table, read_manifest, report_path
+from csv_utils import configure_csv_field_size_limit
 
 
 HEADER = (
@@ -18,6 +19,7 @@ HEADER = (
 
 def coverage_metrics(path):
     """Return length-weighted genomic coverage from samtools coverage output."""
+    configure_csv_field_size_limit()
     text = path.read_text()
     if text.startswith("#rname\t"):
         rows = list(csv.DictReader(text.splitlines(), delimiter="\t"))
@@ -37,6 +39,7 @@ def coverage_metrics(path):
 
 
 def legacy_feature_counts(output_dir):
+    configure_csv_field_size_limit()
     path = output_dir / "featurecounts_BACTERIA_summary.txt"
     with path.open() as handle:
         rows = list(csv.reader((line for line in handle if not line.startswith("#")), delimiter="\t"))

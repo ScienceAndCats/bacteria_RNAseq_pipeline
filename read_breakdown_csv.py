@@ -7,6 +7,7 @@ import json
 import re
 from pathlib import Path
 
+from csv_utils import configure_csv_field_size_limit
 
 ATTRIBUTES = (
     "Total reads",
@@ -75,6 +76,7 @@ def sample_from_log(path):
 
 def assigned_by_sample(path, prefix):
     """Read the Assigned row of a featureCounts .summary file."""
+    configure_csv_field_size_limit()
     with path.open(newline="") as handle:
         rows = list(csv.reader(handle, delimiter="\t"))
     if not rows or rows[0][0] != "Status":
